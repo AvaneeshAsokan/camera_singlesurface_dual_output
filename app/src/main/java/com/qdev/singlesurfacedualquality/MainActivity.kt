@@ -34,6 +34,7 @@ import androidx.core.view.WindowInsetsCompat
 import com.qdev.singlesurfacedualquality.databinding.ActivityMainBinding
 import java.io.File
 import java.io.IOException
+import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 import kotlin.math.max
 
@@ -205,8 +206,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupMuxers() {
         try {
-            val hqFile= File(filesDir, "high_quality.mp4").absolutePath
-            val lqFile= File(filesDir, "low_quality.mp4").absolutePath
+            val hqFile = File(filesDir, "high_quality.mp4").absolutePath
+            val lqFile = File(filesDir, "low_quality.mp4").absolutePath
             hqMuxer = MediaMuxer(hqFile, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             lqMuxer = MediaMuxer(lqFile, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         } catch (e: IOException) {
@@ -214,7 +215,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun stopRecording(){
+    private fun stopRecording() {
         mediaCodec?.signalEndOfInputStream()
         try {
             hqMuxer?.stop()
@@ -270,13 +271,11 @@ class MainActivity : AppCompatActivity() {
         encodeHandler?.post {
             try {
                 val hqToLqDecoder = MediaCodec.createDecoderByType("video/avc")
-                val hqToLqFormat = MediaFormat.createVideoFormat("video/avc", 1920, 1080)
-                hqToLqDecoder.configure(hqToLqFormat, null, null, 0)
-                hqToLqDecoder.start()
-                decoderStarted = true
+                /*hqToLqDecoder.start()
+                decoderStarted = true*/
 
                 val lowQualityCodec = MediaCodec.createEncoderByType("video/avc")
-                val lowQualityFormat = MediaFormat.createVideoFormat("video/avc", 1280, 720)
+                val lowQualityFormat = MediaFormat.createVideoFormat("video/avc", 1920, 1080)
                 lowQualityFormat.setInteger(MediaFormat.KEY_BIT_RATE, 1 * 1000 * 1000) // 1 Mbps
                 lowQualityFormat.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
                 lowQualityFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
@@ -288,7 +287,11 @@ class MainActivity : AppCompatActivity() {
 
                 val bufferInfo = MediaCodec.BufferInfo()
                 val decoderBufferInfo = MediaCodec.BufferInfo()
-                val lowQualityBufferInfo = MediaCodec.BufferInfo()
+                val lqBufferInfo = MediaCodec.BufferInfo()
+                var decoderInputBuffers: Array<ByteBuffer>? = null
+                var decoderOutputBuffers: Array<ByteBuffer>? = null
+                var hqToLqFormat: MediaFormat? = null
+                var decoderConfigured: Boolean = false
 
                 while (true) {
                     if (hqCodecStarted) {
@@ -308,96 +311,109 @@ class MainActivity : AppCompatActivity() {
                                     isHighQualityMuxerStarted = true
                                 }
 
-                                hqOutputBuffer?.duplicate()?.apply {
+                                //  write the data to the muxer
+                                hqOutputBuffer?.apply {
                                     position(bufferInfo.offset)
                                     limit(bufferInfo.offset + bufferInfo.size)
                                     if (isHighQualityMuxerStarted) {
                                         hqMuxer!!.writeSampleData(highQualityVideoTrackIndex, this, bufferInfo)
                                     }
                                 }
-
-                                //  feed the encoded data to the decoder
-                                val decoderInputBufferIndex = hqToLqDecoder.dequeueInputBuffer(-1)
-                                if (decoderInputBufferIndex >= 0) {
-                                    val decoderInputBuffer = hqToLqDecoder.getInputBuffer(decoderInputBufferIndex)
-                                    decoderInputBuffer!!.clear();
-                                    hqOutputBuffer?.let {
-                                        //  rewind the buffer, to reuse the data
-                                        it.position(bufferInfo.offset)
-                                        it.limit(bufferInfo.offset + bufferInfo.size)
-                                        decoderInputBuffer.put(it)
-                                    }
-
-                                    hqToLqDecoder.queueInputBuffer(
-                                        decoderInputBufferIndex,
-                                        0,
-                                        bufferInfo.size,
-                                        bufferInfo.presentationTimeUs,
-                                        bufferInfo.flags
-                                    )
-                                }
                             }
-
+                            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                                // Codec config info.  Only expected on first packet.  One way to
+                                // handle this is to manually stuff the data into the MediaFormat
+                                // and pass that to configure().  We do that here to exercise the API.
+                                hqToLqFormat = MediaFormat.createVideoFormat("video/avc", 1920, 1080)
+                                hqToLqFormat.setByteBuffer("csd-0", hqOutputBuffer)
+                                hqToLqDecoder.configure(
+                                    hqToLqFormat,
+                                    null,
+                                    null,
+                                    0
+                                )
+                                hqToLqDecoder.start()
+                                decoderStarted = true
+                                decoderInputBuffers = hqToLqDecoder.inputBuffers
+                                decoderOutputBuffers = hqToLqDecoder.outputBuffers
+                                decoderConfigured = true
+                            } else {
+                                // Get a decoder input buffer, blocking until it's available.
+                                val inputBufIndex = hqToLqDecoder.dequeueInputBuffer(-1)
+                                val inputBuf: ByteBuffer? = decoderInputBuffers?.get(inputBufIndex)
+                                inputBuf?.clear()
+                                inputBuf?.put(hqOutputBuffer)
+                                hqToLqDecoder.queueInputBuffer(
+                                    inputBufIndex,
+                                    0,
+                                    bufferInfo.size,
+                                    bufferInfo.presentationTimeUs,
+                                    bufferInfo.flags
+                                )
+                            }
                             mediaCodec!!.releaseOutputBuffer(hqOutputBufferIndex, false)
 
-                            // Decode to raw frames
-                            val decoderOutputBufferIndex = hqToLqDecoder.dequeueOutputBuffer(decoderBufferInfo, 0)
-                            if (decoderOutputBufferIndex >= 0) {
-                                val rawFrame = hqToLqDecoder.getOutputBuffer(decoderOutputBufferIndex)
+                            if (decoderConfigured) {
+                                val decoderStatus = hqToLqDecoder.dequeueOutputBuffer(decoderBufferInfo, 0)
+                                if (decoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                                    //  no output available yet
+                                    Log.d(TAG, "encodeFrames: no output available yet")
+                                } else if (decoderStatus == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
+                                    decoderOutputBuffers = hqToLqDecoder.outputBuffers
+                                } else if (decoderStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                                    hqToLqFormat = hqToLqDecoder.outputFormat
+                                    Log.d(TAG, "encodeFrames: new format $hqToLqFormat")
+                                } else if (decoderStatus < 0) {
+                                    Log.e(TAG, "decodeFrame: unexpected result from decoder.dequeueOutputBuffer: $decoderStatus")
+                                } else {
+                                    val outputBuffer = decoderOutputBuffers!![decoderStatus]
+                                    outputBuffer.position(decoderBufferInfo.offset)
+                                    outputBuffer.limit(decoderBufferInfo.offset + decoderBufferInfo.size)
+                                    if (decoderBufferInfo.size != 0) {
+                                        //  send this to the lq codec
 
-                                if (decoderBufferInfo.size != 0 && lqCodecStarted) {
-                                    // Feed the raw frame to the low quality encoder
-                                    val inputBufferIndex = lowQualityCodec.dequeueInputBuffer(0)
-                                    if (inputBufferIndex >= 0) {
-                                        val lqInputBuffer = lowQualityCodec.getInputBuffer(inputBufferIndex)
+                                        val lqInputBufferIndex = lowQualityCodec.dequeueInputBuffer(-1)
+                                        val lqInputBuffer = lowQualityCodec.getInputBuffer(lqInputBufferIndex)
                                         lqInputBuffer?.clear()
-                                        rawFrame?.let {
-                                            lqInputBuffer?.put(it)
-                                        }
+                                        lqInputBuffer?.put(outputBuffer)
                                         lowQualityCodec.queueInputBuffer(
-                                            inputBufferIndex,
+                                            lqInputBufferIndex,
                                             0,
                                             decoderBufferInfo.size,
                                             decoderBufferInfo.presentationTimeUs,
                                             decoderBufferInfo.flags
                                         )
                                     }
+                                    hqToLqDecoder.releaseOutputBuffer(decoderStatus, false)
                                 }
 
-                                hqToLqDecoder.releaseOutputBuffer(decoderOutputBufferIndex, false)
-                            }
-
-                            if (lqCodecStarted) {
-                                val lqOutputBufferIndex = lowQualityCodec.dequeueOutputBuffer(lowQualityBufferInfo, 0)
+                                val lqOutputBufferIndex = lowQualityCodec.dequeueOutputBuffer(lqBufferInfo, 0)
                                 if (lqOutputBufferIndex >= 0) {
                                     val lqOutputBuffer = lowQualityCodec.getOutputBuffer(lqOutputBufferIndex)
-                                    if (lowQualityBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                                        lowQualityBufferInfo.size = 0
+                                    if (lqBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                                        lqBufferInfo.size = 0
                                     }
 
-                                    if (lowQualityBufferInfo.size != 0) {
-                                        //  start the lq muxer if not stated
+                                    if (lqBufferInfo.size != 0) {
+                                        // start the muxer if not stated
                                         if (!isLowQualityMuxerStarted) {
                                             lowQualityVideoTrackIndex = lqMuxer!!.addTrack(lowQualityCodec.outputFormat)
                                             lqMuxer!!.start()
                                             isLowQualityMuxerStarted = true
                                         }
 
+                                        //  write the data to the muxer
                                         lqOutputBuffer?.apply {
-                                            position(lowQualityBufferInfo.offset)
-                                            limit(lowQualityBufferInfo.offset + lowQualityBufferInfo.size)
+                                            position(lqBufferInfo.offset)
+                                            limit(lqBufferInfo.offset + lqBufferInfo.size)
                                             if (isLowQualityMuxerStarted) {
-                                                lqMuxer!!.writeSampleData(lowQualityVideoTrackIndex, this, lowQualityBufferInfo)
+                                                lqMuxer!!.writeSampleData(lowQualityVideoTrackIndex, this, lqBufferInfo)
                                             }
                                         }
                                     }
 
                                     lowQualityCodec.releaseOutputBuffer(lqOutputBufferIndex, false)
                                 }
-                            }
-
-                            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                                break
                             }
                         }
                     }
@@ -466,7 +482,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindListeners() {
-        with(binding){
+        with(binding) {
             btnCapture.setOnClickListener {
                 if (!isRecording) {
                     startRecording()
