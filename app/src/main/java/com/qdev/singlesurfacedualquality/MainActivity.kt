@@ -3,6 +3,7 @@ package com.qdev.singlesurfacedualquality
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
@@ -15,6 +16,8 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.media.Image
+import android.media.ImageReader
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -22,6 +25,7 @@ import android.media.MediaMuxer
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.provider.MediaStore.Audio.Media
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
@@ -29,21 +33,26 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.performance.play.services.PlayServicesDevicePerformance
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.qdev.singlesurfacedualquality.databinding.ActivityMainBinding
+import com.qdev.singlesurfacedualquality.utils.InputSurface
 import com.qdev.singlesurfacedualquality.utils.OutputSurface
+import com.qdev.singlesurfacedualquality.utils.YuvUtils
 import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 import kotlin.math.max
+import kotlin.system.measureTimeMillis
 
 
 class MainActivity : AppCompatActivity() {
     private val TAG = MainActivity::class.java.canonicalName
 
     private lateinit var binding: ActivityMainBinding
+    private lateinit var devicePerformance: PlayServicesDevicePerformance
 
     private val permissions: Array<String> = arrayOf(android.Manifest.permission.CAMERA, android.Manifest.permission.RECORD_AUDIO)
 
@@ -59,6 +68,7 @@ class MainActivity : AppCompatActivity() {
     private var mediaCodec: MediaCodec? = null
     private var hqMuxer: MediaMuxer? = null
     private var lqMuxer: MediaMuxer? = null
+    private var imageReader: ImageReader? = null
     private var highQualityVideoTrackIndex: Int = -1
     private var lowQualityVideoTrackIndex: Int = -1
     private var hqCodecStarted: Boolean = false
@@ -66,6 +76,154 @@ class MainActivity : AppCompatActivity() {
     private var decoderStarted: Boolean = false
     private var isHighQualityMuxerStarted: Boolean = false
     private var isLowQualityMuxerStarted: Boolean = false
+
+    private val FRAGMENT_SHADER: String =
+        "#extension GL_OES_EGL_image_external : require\n" +
+                "precision mediump float;\n" +
+                "varying vec2 vTextureCoord;\n" +
+                "uniform samplerExternalOES sTexture;\n" +
+                "void main() {\n" +
+                "  gl_FragColor = texture2D(sTexture, vTextureCoord).rbga;\n" +
+                "}\n"
+
+    private val imReaderBufferInfo = MediaCodec.BufferInfo()
+    private val imageListener = ImageReader.OnImageAvailableListener { reader ->
+        val cameraImage = reader.acquireLatestImage()?:return@OnImageAvailableListener
+
+        Log.d(TAG, "onImageAvailable: image format ${cameraImage.format}, plane 0 size ${cameraImage.planes[0].buffer.remaining()}")
+
+        if (mediaCodec == null || !hqCodecStarted){
+            mediaCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+
+            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1920, 1080)
+            format.setInteger(MediaFormat.KEY_BIT_RATE, 10 * 1000 * 1000) // 10 Mbps
+            format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second between I-frames
+
+            mediaCodec!!.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+
+            mediaCodec!!.start()
+            hqCodecStarted = true
+        }
+
+        val index = mediaCodec?.dequeueInputBuffer(0)
+
+        if (index != null && index >= 0) {
+            val inBuff = mediaCodec?.getInputBuffer(index)
+            if ((inBuff?.capacity()?:-1) >= 0) {
+                //  copy the ImageReader image to the input image
+                val inputImage = mediaCodec?.getInputImage(index)
+                inputImage?.let {
+                    YuvUtils.copyYUV(cameraImage, it)
+
+                    mediaCodec?.queueInputBuffer(
+                        index,
+                        0,
+                        /*size*/ cameraImage.planes[0].buffer.remaining(),
+                        /*yuvImage.timestampUs*/cameraImage.timestamp/1000,
+                        if (isRecording) 0 else MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                    )
+                }
+            } else {
+                mediaCodec?.queueInputBuffer(index, 0, 0, 0, if (isRecording) 0 else MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+            }
+        }
+
+        cameraImage.close()
+
+        val outputBufferIndex = mediaCodec?.dequeueOutputBuffer(imReaderBufferInfo, 500)
+        if (outputBufferIndex != null && outputBufferIndex >= 0) {
+            val outputBuffer = mediaCodec?.getOutputBuffer(outputBufferIndex)
+
+            if (imReaderBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                imReaderBufferInfo.size = 0
+            }
+
+            if (imReaderBufferInfo.size != 0) {
+                // start the muxer if not stated
+                if (!isHighQualityMuxerStarted && isRecording && hqMuxer != null) {
+                    highQualityVideoTrackIndex = hqMuxer!!.addTrack(mediaCodec!!.outputFormat)
+                    hqMuxer!!.start()
+                    isHighQualityMuxerStarted = true
+                }
+
+                //  write the data to the muxer
+                outputBuffer?.apply {
+                    position(imReaderBufferInfo.offset)
+                    limit(imReaderBufferInfo.offset + imReaderBufferInfo.size)
+                    if (isHighQualityMuxerStarted) {
+                        try {
+                            hqMuxer!!.writeSampleData(highQualityVideoTrackIndex, this, imReaderBufferInfo)
+                        } catch (e: IllegalStateException) {
+                            e.printStackTrace()
+                        }
+                    }
+                }
+            }
+
+            mediaCodec?.releaseOutputBuffer(outputBufferIndex, false)
+        }
+
+        if (!isRecording) {
+//            mediaCodec?.signalEndOfInputStream()
+            try {
+                mediaCodec?.stop()
+            } catch (e: IllegalStateException) {
+                e.printStackTrace()
+            } finally {
+                mediaCodec?.release()
+                mediaCodec = null
+            }
+
+            try {
+                isHighQualityMuxerStarted = false
+                hqMuxer?.stop()
+            } catch (e: IllegalStateException) {
+                e.printStackTrace()
+            } finally {
+                hqMuxer?.release()
+                hqMuxer = null
+            }
+
+            imageReader?.setOnImageAvailableListener(null, null)
+            imageReader?.close()
+            imageReader = null
+        }
+    }
+
+    private fun copyYUVImage(srcImage: Image, dstImage: Image) {
+        // Get the image planes for both source and destination images
+        val srcPlanes = srcImage.planes
+        val dstPlanes = dstImage.planes
+
+        for (i in srcPlanes.indices) {
+            val srcBuffer = srcPlanes[i].buffer
+            val dstBuffer = dstPlanes[i].buffer
+
+            val srcRowStride = srcPlanes[i].rowStride
+            val dstRowStride = dstPlanes[i].rowStride
+            val srcPixelStride = srcPlanes[i].pixelStride
+            val dstPixelStride = dstPlanes[i].pixelStride
+
+            val width = srcImage.width shr (if (i == 0) 0 else 1)
+            val height = srcImage.height shr (if (i == 0) 0 else 1)
+
+            if (srcRowStride == dstRowStride && srcPixelStride == dstPixelStride) {
+                // Fast path: if row stride and pixel stride match, we can copy the whole buffer at once
+                dstBuffer.put(srcBuffer)
+            } else {
+                // Slow path: copy row by row
+                for (row in 0 until height) {
+                    val srcPos = row * srcRowStride
+                    val dstPos = row * dstRowStride
+                    for (col in 0 until width) {
+                        dstBuffer.put(dstPos + col * dstPixelStride, srcBuffer[srcPos + col * srcPixelStride])
+                    }
+                }
+            }
+        }
+    }
 
     private val manager by lazy { getSystemService(Context.CAMERA_SERVICE) as CameraManager }
 
@@ -172,15 +330,17 @@ class MainActivity : AppCompatActivity() {
             texture?.setDefaultBufferSize(1920, 1080)
             val previewSurface = Surface(texture)
 
-            val highQualitySurface: Surface = mediaCodec!!.createInputSurface()
+//            val highQualitySurface: Surface = mediaCodec!!.createInputSurface()
 
             val captureRequestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
             captureRequestBuilder.addTarget(previewSurface)
-            captureRequestBuilder.addTarget(highQualitySurface)
+            captureRequestBuilder.addTarget(imageReader!!.surface)
+//            captureRequestBuilder.addTarget(highQualitySurface)
 
             val surfaces: MutableList<Surface> = ArrayList()
             surfaces.add(previewSurface)
-            surfaces.add(highQualitySurface)
+            surfaces.add(imageReader!!.surface)
+//            surfaces.add(highQualitySurface)
 
             cameraDevice!!.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
@@ -188,9 +348,10 @@ class MainActivity : AppCompatActivity() {
                     captureRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
                     try {
                         captureSession!!.setRepeatingRequest(captureRequestBuilder.build(), null, null)
-                        mediaCodec?.start()
-                        hqCodecStarted = true
-                        encodeFrames()
+//                        mediaCodec?.start()
+                        Log.d(TAG, "onConfigured: max supported instances ${mediaCodec?.codecInfo?.getCapabilitiesForType("video/avc")?.maxSupportedInstances}")
+//                        hqCodecStarted = true
+//                        encodeFrames()
                     } catch (e: CameraAccessException) {
                         e.printStackTrace()
                     }
@@ -217,10 +378,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopRecording() {
-        mediaCodec?.signalEndOfInputStream()
         try {
             hqMuxer?.stop()
-
         } catch (e: IllegalStateException) {
             e.printStackTrace()
         } finally {
@@ -248,13 +407,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupSingleSurface() {
-        try {
+        /*try {
             mediaCodec = MediaCodec.createEncoderByType("video/avc")
 
             val format = MediaFormat.createVideoFormat("video/avc", 1920, 1080)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 10 * 1000 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second between I-frames
 
             mediaCodec!!.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -262,13 +421,19 @@ class MainActivity : AppCompatActivity() {
             e.printStackTrace()
         } catch (e: CameraAccessException) {
             e.printStackTrace()
-        }
+        }*/
+
+        imageReader?.close()
+        imageReader = ImageReader.newInstance(1920, 1080, android.graphics.ImageFormat.YUV_420_888, 2)
+        imageReader?.setOnImageAvailableListener(imageListener, backgroundHandler)
     }
 
     private fun encodeFrames() {
         encodeThread = HandlerThread("EncodeThread")
         encodeThread!!.start()
         encodeHandler = Handler(encodeThread!!.looper)
+
+        val outputSurface = OutputSurface(1920, 1080)
         encodeHandler?.post {
             try {
                 val hqToLqDecoder = MediaCodec.createDecoderByType("video/avc")
@@ -282,14 +447,16 @@ class MainActivity : AppCompatActivity() {
                 var decoderOutputBuffers: Array<ByteBuffer>? = null
                 var hqToLqFormat: MediaFormat? = null
                 var decoderConfigured: Boolean = false
-                var decoderOutputSurface: OutputSurface? = null
 
                 val lowQualityCodec = MediaCodec.createEncoderByType("video/avc")
                 val lowQualityFormat = MediaFormat.createVideoFormat("video/avc", 1920, 1080)
-                lowQualityFormat.setInteger(MediaFormat.KEY_BIT_RATE, 1 * 1000 * 1000) // 1 Mbps
-                lowQualityFormat.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-                lowQualityFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
-                lowQualityFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second between I-frames
+                lowQualityFormat.apply {
+                    setInteger(MediaFormat.KEY_BIT_RATE, 1 * 1000 * 1000) // 1 Mbps
+                    setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second between I-frames
+                }
+                var inputSurface: InputSurface? = null
 
                 lqCodecStarted = true
 
@@ -326,24 +493,61 @@ class MainActivity : AppCompatActivity() {
                                 // and pass that to configure().  We do that here to exercise the API.
                                 hqToLqFormat = MediaFormat.createVideoFormat("video/avc", 1920, 1080)
                                 hqToLqFormat.setByteBuffer("csd-0", hqOutputBuffer)
-                                decoderOutputSurface = OutputSurface(1920, 1080)
+
+                                lowQualityCodec.setCallback(object : MediaCodec.Callback() {
+                                    override fun onInputBufferAvailable(codec: MediaCodec, index: Int) = Unit
+
+                                    override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                                        Log.d(TAG, "onOutputBufferAvailable: lq outputBuffer available")
+                                        if (bufferInfo.size != 0) {
+                                            // start the muxer if not stated
+                                            if (!isLowQualityMuxerStarted) {
+                                                lowQualityVideoTrackIndex = lqMuxer!!.addTrack(codec.outputFormat)
+                                                lqMuxer!!.start()
+                                                isLowQualityMuxerStarted = true
+                                            }
+
+                                            //  write the data to the muxer
+                                            hqOutputBuffer?.apply {
+                                                position(bufferInfo.offset)
+                                                limit(bufferInfo.offset + bufferInfo.size)
+                                                if (isLowQualityMuxerStarted) {
+                                                    lqMuxer!!.writeSampleData(lowQualityVideoTrackIndex, this, bufferInfo)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) = Unit
+
+                                    override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) = Unit
+                                })
+
                                 hqToLqDecoder.configure(
                                     hqToLqFormat,
-                                    decoderOutputSurface.surface,
+                                    /*decoderOutputSurface.surface!!*/
+                                    outputSurface.surface,
                                     null,
                                     0
                                 )
+
+                                Log.d(TAG, "encodeFrames: max supported decoders ${hqToLqDecoder.codecInfo.getCapabilitiesForType("video/avc").maxSupportedInstances}")
                                 hqToLqDecoder.start()
                                 decoderStarted = true
                                 decoderInputBuffers = hqToLqDecoder.inputBuffers
                                 decoderOutputBuffers = hqToLqDecoder.outputBuffers
                                 decoderConfigured = true
+
+                                lowQualityCodec.configure(lowQualityFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                                inputSurface = InputSurface(lowQualityCodec.createInputSurface())
+                                inputSurface.makeCurrent()
                             } else {
                                 // Get a decoder input buffer, blocking until it's available.
                                 val inputBufIndex = hqToLqDecoder.dequeueInputBuffer(-1)
                                 val inputBuf: ByteBuffer? = decoderInputBuffers?.get(inputBufIndex)
                                 inputBuf?.clear()
-                                inputBuf?.put(hqOutputBuffer)
+                                inputBuf?.put(hqOutputBuffer!!)
+
                                 hqToLqDecoder.queueInputBuffer(
                                     inputBufIndex,
                                     0,
@@ -360,7 +564,8 @@ class MainActivity : AppCompatActivity() {
                                     //  no output available yet
                                     Log.d(TAG, "encodeFrames: no output available yet")
                                 } else if (decoderStatus == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
-                                    decoderOutputBuffers = hqToLqDecoder.outputBuffers
+//                                    decoderOutputBuffers = hqToLqDecoder.outputBuffers
+                                    Log.d(TAG, "encodeFrames: output buffers changed")
                                 } else if (decoderStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                                     hqToLqFormat = hqToLqDecoder.outputFormat
                                     Log.d(TAG, "encodeFrames: new format $hqToLqFormat")
@@ -369,44 +574,22 @@ class MainActivity : AppCompatActivity() {
                                 } else {
                                     val doRender = decoderBufferInfo.size != 0
                                     if (decoderBufferInfo.size > 0) {
-                                        decoderOutputSurface?.makeCurrent()
                                         hqToLqDecoder.releaseOutputBuffer(decoderStatus, doRender)
+                                        Log.d(TAG, "encodeFrames: render = $doRender")
                                         if (doRender) {
-//                                            decoderOutputSurface?.awaitNewImage()
-                                            decoderOutputSurface?.drawImage()
-
                                             if (!lqCodecStarted) {
-                                                lowQualityCodec.setInputSurface(decoderOutputSurface!!.surface)
-                                                lowQualityCodec.setCallback(object : MediaCodec.Callback() {
-                                                    override fun onInputBufferAvailable(codec: MediaCodec, index: Int) = Unit
+//                                                lowQualityCodec.setInputSurface(inputSurface.surface)
+                                                //  create input surface to be called only after config and before start.
 
-                                                    override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                                                        if (bufferInfo.size != 0) {
-                                                            // start the muxer if not stated
-                                                            if (!isLowQualityMuxerStarted) {
-                                                                lowQualityVideoTrackIndex = lqMuxer!!.addTrack(codec.outputFormat)
-                                                                lqMuxer!!.start()
-                                                                isLowQualityMuxerStarted = true
-                                                            }
-
-                                                            //  write the data to the muxer
-                                                            hqOutputBuffer?.apply {
-                                                                position(bufferInfo.offset)
-                                                                limit(bufferInfo.offset + bufferInfo.size)
-                                                                if (isLowQualityMuxerStarted) {
-                                                                    lqMuxer!!.writeSampleData(lowQualityVideoTrackIndex, this, bufferInfo)
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-
-                                                    override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) = Unit
-
-                                                    override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) = Unit
-                                                })
-                                                lowQualityCodec.configure(lowQualityFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                                                 lowQualityCodec.start()
                                                 lqCodecStarted = true
+                                            }
+                                            runOnUiThread {
+                                                outputSurface.awaitNewImage()
+                                                outputSurface.drawImage()
+                                                Log.d(TAG, "encodeFrames: drawing image")
+                                                inputSurface?.setPresentationTime(decoderBufferInfo.presentationTimeUs * 1000)
+                                                inputSurface?.swapBuffers()
                                             }
                                         }
                                     }
@@ -429,7 +612,7 @@ class MainActivity : AppCompatActivity() {
                 hqCodecStarted = false
                 decoderStarted = false
                 lqCodecStarted = false
-                decoderOutputSurface?.release()
+//                decoderOutputSurface?.release()
             } catch (e: IOException) {
                 e.printStackTrace()
             }
@@ -476,6 +659,8 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
+        devicePerformance = PlayServicesDevicePerformance(this.applicationContext)
+
         bindListeners()
     }
 
@@ -498,6 +683,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        Log.d(TAG, "onResume: Media performance class = ${devicePerformance.mediaPerformanceClass}")
+
         if (!hasPermissions()) {
             cameraPermissionRequest.launch(permissions)
         } else {
@@ -569,4 +756,33 @@ class MainActivity : AppCompatActivity() {
         }
         return true
     }
+}
+
+class YUV420(
+    val width: Int,
+    val height: Int,
+    val y: ByteBuffer,
+    val u: ByteBuffer,
+    val v: ByteBuffer,
+    val timestampUs: Long
+)
+
+//  extension function to copy the ByteBuffer
+private fun ByteBuffer.makeCopy(): ByteBuffer {
+    val buffer = if (isDirect) ByteBuffer.allocateDirect(capacity()) else ByteBuffer.allocate(capacity())
+
+    val position = position()
+    val limit = limit()
+    rewind()
+
+    buffer.put(this)
+    buffer.rewind()
+
+    position(position)
+    limit(limit)
+
+    buffer.position(position)
+    buffer.limit(limit)
+
+    return buffer
 }
