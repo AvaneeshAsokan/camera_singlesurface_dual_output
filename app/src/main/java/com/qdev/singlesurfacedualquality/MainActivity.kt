@@ -100,13 +100,13 @@ class MainActivity : AppCompatActivity() {
 
         cameraImage.close()
 
-        encodeHandler?.post {
+//        encodeHandler?.post {
             handleHqCodecOutputBuffer()
-        }
+//        }
 
-        encodeLqHandler?.post {
+//        encodeLqHandler?.post {
             handleLqCodecOutputBuffer()
-        }
+//        }
 
         if (!isRecording) {
 //            mediaCodec?.signalEndOfInputStream()
@@ -167,7 +167,7 @@ class MainActivity : AppCompatActivity() {
                     mediaCodec?.queueInputBuffer(
                         /* index = */ index,
                         /* offset = */ 0,
-                        /* size = */ cameraImage.planes[0].buffer.remaining(),
+                        /* size = */ it.planes[0].buffer.remaining(),
                         /* presentationTimeUs = */ cameraImage.timestamp / 1000,
                         /* flags = */ if (isRecording) 0 else MediaCodec.BUFFER_FLAG_END_OF_STREAM
                     )
@@ -191,7 +191,7 @@ class MainActivity : AppCompatActivity() {
                     lqMediaCodec?.queueInputBuffer(
                         /* index = */ index,
                         /* offset = */ 0,
-                        /* size = */ cameraImage.planes[0].buffer.remaining(),
+                        /* size = */ it.planes[0].buffer.remaining(),
                         /* presentationTimeUs = */ cameraImage.timestamp / 1000,
                         /* flags = */ if (isRecording) 0 else MediaCodec.BUFFER_FLAG_END_OF_STREAM
                     )
@@ -213,10 +213,9 @@ class MainActivity : AppCompatActivity() {
 
             if (imReaderBufferInfo.size != 0) {
                 // start the muxer if not stated
-                if (!isHighQualityMuxerStarted && isRecording && hqMuxer != null) {
-                    highQualityVideoTrackIndex = hqMuxer!!.addTrack(mediaCodec!!.outputFormat)
-                    hqMuxer!!.start()
-                    isHighQualityMuxerStarted = true
+                if (!isHighQualityMuxerStarted && isRecording) {
+                    highQualityVideoTrackIndex = hqMuxer?.addTrack(mediaCodec!!.outputFormat) ?: -1
+                    hqMuxer?.start()?.also { isHighQualityMuxerStarted = true }
                 }
 
                 //  write the data to the muxer
@@ -248,10 +247,9 @@ class MainActivity : AppCompatActivity() {
 
             if (imReaderBufferInfo.size != 0) {
                 // start the muxer if not stated
-                if (!isLowQualityMuxerStarted && isRecording && lqMuxer != null) {
-                    lowQualityVideoTrackIndex = lqMuxer!!.addTrack(lqMediaCodec!!.outputFormat)
-                    lqMuxer!!.start()
-                    isLowQualityMuxerStarted = true
+                if (!isLowQualityMuxerStarted && isRecording) {
+                    lowQualityVideoTrackIndex = lqMuxer?.addTrack(lqMediaCodec!!.outputFormat) ?: -1
+                    lqMuxer?.start()?.also { isLowQualityMuxerStarted = true }
                 }
 
                 //  write the data to the muxer
@@ -510,7 +508,7 @@ class MainActivity : AppCompatActivity() {
             mediaCodec = MediaCodec.createEncoderByType("video/avc")
 
             val format = MediaFormat.createVideoFormat("video/avc", 1920, 1080)
-            format.setInteger(MediaFormat.KEY_BIT_RATE, 10 * 1000 * 1000) // 10 Mbps
+            format.setInteger(MediaFormat.KEY_BIT_RATE, 6 * 1000 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second between I-frames
@@ -528,7 +526,7 @@ class MainActivity : AppCompatActivity() {
             format.setInteger(MediaFormat.KEY_BIT_RATE,  500 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
-            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second between I-frames
+            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5) // 1 second between I-frames
 
             lqMediaCodec!!.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         } catch (e: IOException) {
