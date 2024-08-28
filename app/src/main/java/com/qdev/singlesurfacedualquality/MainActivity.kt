@@ -83,17 +83,18 @@ class MainActivity : AppCompatActivity() {
     private var semaphore: Semaphore = Semaphore(1)
 
     private val FRAGMENT_SHADER: String =
-        "#extension GL_OES_EGL_image_external : require\n" +
-                "precision mediump float;\n" +
-                "varying vec2 vTextureCoord;\n" +
-                "uniform samplerExternalOES sTexture;\n" +
-                "void main() {\n" +
-                "  gl_FragColor = texture2D(sTexture, vTextureCoord).rbga;\n" +
-                "}\n"
+        "#extension GL_OES_EGL_image_external : require\n" + "precision mediump float;\n" + "varying vec2 vTextureCoord;\n" + "uniform samplerExternalOES sTexture;\n" + "void main() {\n" + "  gl_FragColor = texture2D(sTexture, vTextureCoord).rbga;\n" + "}\n"
 
     private val imReaderBufferInfo = MediaCodec.BufferInfo()
     private var hqDone: AtomicBoolean = AtomicBoolean(false)
     private var lqDone: AtomicBoolean = AtomicBoolean(false)
+    //  the frame counts for each output file
+    private var hqFrameCount: Int = 0
+    private var lqFrameCount: Int = 0
+    //  the output file counts
+    private var hqFileCount: Int = 0
+    private var lqFileCount: Int = 0
+
     private val imageListener = ImageReader.OnImageAvailableListener { reader ->
         val cameraImage = reader.acquireLatestImage() ?: return@OnImageAvailableListener
 
@@ -178,12 +179,17 @@ class MainActivity : AppCompatActivity() {
                     inputImage?.let {
                         YuvUtils.copyYUV(cameraImage, it)
 
-                        mediaCodec?.queueInputBuffer(
-                            /* index = */ index,
-                            /* offset = */ 0,
-                            /* size = */ it.planes[0].buffer.remaining(),
-                            /* presentationTimeUs = */ cameraImage.timestamp / 1000,
-                            /* flags = */ if (isRecording) 0 else MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                        mediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
+                            0,/* size = */
+                            it.planes[0].buffer.remaining(),/* presentationTimeUs = */
+                            cameraImage.timestamp / 1000,/* flags = */
+                            if (isRecording) {
+                                if (hqFrameCount == 300){
+                                    MediaCodec.BUFFER_FLAG_KEY_FRAME
+                                } else {
+                                    0
+                                }
+                            } else MediaCodec.BUFFER_FLAG_END_OF_STREAM
                         )
                     }
                 } else {
@@ -191,6 +197,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            hqFrameCount++
             semaphore.release()
         }
     }
@@ -206,12 +213,19 @@ class MainActivity : AppCompatActivity() {
                     inputImage?.let {
                         YuvUtils.copyYUV(cameraImage, it)
 
-                        lqMediaCodec?.queueInputBuffer(
-                            /* index = */ index,
-                            /* offset = */ 0,
-                            /* size = */ it.planes[0].buffer.remaining(),
-                            /* presentationTimeUs = */ cameraImage.timestamp / 1000,
-                            /* flags = */ if (isRecording) 0 else MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                        lqMediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
+                            0,/* size = */
+                            it.planes[0].buffer.remaining(),/* presentationTimeUs = */
+                            cameraImage.timestamp / 1000,/* flags = */
+                            if (isRecording) {
+                                if (lqFrameCount == 300) {
+                                    MediaCodec.BUFFER_FLAG_KEY_FRAME
+                                } else {
+                                    0
+                                }
+                            } else {
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                            }
                         )
                     }
                 } else {
@@ -219,6 +233,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            lqFrameCount++
             semaphore.release()
         }
     }
@@ -254,6 +269,21 @@ class MainActivity : AppCompatActivity() {
             }
 
             mediaCodec?.releaseOutputBuffer(outputBufferIndex, false)
+
+            if (hqFrameCount >= 300) {
+                hqFrameCount = 0
+                try {
+                    isHighQualityMuxerStarted = false
+                    hqMuxer?.stop()
+                } catch (e: IllegalStateException) {
+                    e.printStackTrace()
+                } finally {
+                    hqMuxer?.release()
+                    hqMuxer = null
+                }
+                hqFileCount++
+                hqMuxer = MediaMuxer(File(filesDir, "high_quality_$hqFileCount.mp4").absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            }
         }
     }
 
@@ -288,6 +318,21 @@ class MainActivity : AppCompatActivity() {
             }
 
             lqMediaCodec?.releaseOutputBuffer(outputBufferIndex, false)
+
+            if (lqFrameCount >= 300) {
+                lqFrameCount = 0
+                try {
+                    isLowQualityMuxerStarted = false
+                    lqMuxer?.stop()
+                } catch (e: IllegalStateException) {
+                    e.printStackTrace()
+                } finally {
+                    lqMuxer?.release()
+                    lqMuxer = null
+                }
+                lqFileCount++
+                lqMuxer = MediaMuxer(File(filesDir, "low_quality_$lqFileCount.mp4").absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            }
         }
     }
 
@@ -376,8 +421,7 @@ class MainActivity : AppCompatActivity() {
 
         backgroundHandler?.post {
             try {
-                val texture = binding.texture.surfaceTexture
-                    ?.apply { setDefaultBufferSize(binding.texture.width, binding.texture.height) }
+                val texture = binding.texture.surfaceTexture?.apply { setDefaultBufferSize(binding.texture.width, binding.texture.height) }
                 val surface = texture?.let { Surface(it) }
                 if (surface == null) {
                     Log.e(TAG, "Error creating camera preview surface")
@@ -390,8 +434,7 @@ class MainActivity : AppCompatActivity() {
                 val outputConfig = ArrayList<OutputConfiguration>()
                 outputConfig.add(OutputConfiguration(surface))
 
-                val sessionConfig = SessionConfiguration(
-                    SessionConfiguration.SESSION_REGULAR,
+                val sessionConfig = SessionConfiguration(SessionConfiguration.SESSION_REGULAR,
                     outputConfig,
                     Executors.newCachedThreadPool(),
                     object : CameraCaptureSession.StateCallback() {
@@ -576,8 +619,7 @@ class MainActivity : AppCompatActivity() {
         val outputSurface = OutputSurface(1920, 1080)
         encodeHandler?.post {
             try {
-                val hqToLqDecoder = MediaCodec.createDecoderByType("video/avc")
-                /*hqToLqDecoder.start()
+                val hqToLqDecoder = MediaCodec.createDecoderByType("video/avc")/*hqToLqDecoder.start()
                 decoderStarted = true*/
 
                 val bufferInfo = MediaCodec.BufferInfo()
@@ -664,11 +706,8 @@ class MainActivity : AppCompatActivity() {
                                 })
 
                                 hqToLqDecoder.configure(
-                                    hqToLqFormat,
-                                    /*decoderOutputSurface.surface!!*/
-                                    outputSurface.surface,
-                                    null,
-                                    0
+                                    hqToLqFormat,/*decoderOutputSurface.surface!!*/
+                                    outputSurface.surface, null, 0
                                 )
 
                                 Log.d(
@@ -692,11 +731,7 @@ class MainActivity : AppCompatActivity() {
                                 inputBuf?.put(hqOutputBuffer!!)
 
                                 hqToLqDecoder.queueInputBuffer(
-                                    inputBufIndex,
-                                    0,
-                                    bufferInfo.size,
-                                    bufferInfo.presentationTimeUs,
-                                    bufferInfo.flags
+                                    inputBufIndex, 0, bufferInfo.size, bufferInfo.presentationTimeUs, bufferInfo.flags
                                 )
                             }
                             mediaCodec!!.releaseOutputBuffer(hqOutputBufferIndex, false)
@@ -860,16 +895,14 @@ class MainActivity : AppCompatActivity() {
         val rotation = windowManager?.defaultDisplay?.rotation
         val matrix = Matrix()
         val viewRect = RectF(0F, 0F, viewWidth.toFloat(), viewHeight.toFloat())
-        val bufferRect =
-            RectF(0F, 0F, binding.texture.height.toFloat(), binding.texture.width.toFloat())
+        val bufferRect = RectF(0F, 0F, binding.texture.height.toFloat(), binding.texture.width.toFloat())
         val centerX = viewRect.centerX()
         val centerY = viewRect.centerY()
         if (Surface.ROTATION_0 == rotation) {
             bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
             matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.CENTER)
             val scale = max(
-                viewHeight.toFloat() / binding.texture.width,
-                viewWidth.toFloat() / binding.texture.height
+                viewHeight.toFloat() / binding.texture.width, viewWidth.toFloat() / binding.texture.height
             )
             matrix.postScale(scale, scale, centerX, centerY)
         } else if (Surface.ROTATION_90 == rotation || Surface.ROTATION_270 == rotation) {
@@ -878,8 +911,7 @@ class MainActivity : AppCompatActivity() {
             bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
             matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
             val scale = max(
-                viewHeight.toFloat() / binding.texture.height,
-                viewWidth.toFloat() / binding.texture.width
+                viewHeight.toFloat() / binding.texture.height, viewWidth.toFloat() / binding.texture.width
             )
             Log.d(TAG, "configureTransform: scale $scale")
             matrix.postScale(scale, scale, centerX, centerY)
@@ -902,12 +934,7 @@ class MainActivity : AppCompatActivity() {
 }
 
 class YUV420(
-    val width: Int,
-    val height: Int,
-    val y: ByteBuffer,
-    val u: ByteBuffer,
-    val v: ByteBuffer,
-    val timestampUs: Long
+    val width: Int, val height: Int, val y: ByteBuffer, val u: ByteBuffer, val v: ByteBuffer, val timestampUs: Long
 )
 
 //  extension function to copy the ByteBuffer
