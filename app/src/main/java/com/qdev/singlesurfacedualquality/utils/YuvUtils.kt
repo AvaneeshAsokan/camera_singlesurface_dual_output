@@ -1,6 +1,8 @@
 package com.qdev.singlesurfacedualquality.utils
 
 import android.media.Image
+import com.qdev.singlesurfacedualquality.YUV420
+import java.nio.ByteBuffer
 
 object YuvUtils {
     init {
@@ -9,4 +11,19 @@ object YuvUtils {
 
     external fun copyYUV(srcImage: Image, destImage: Image)
 //    external fun copyYUV2(srcImage: Image, destImage: Image)
+    external fun addToNativeQueue(yData: ByteBuffer,
+                                  uData: ByteBuffer,
+                                  vData: ByteBuffer,
+                                  yRowStride: Int,
+                                  uRowStride: Int,
+                                  vRowStride: Int,
+                                  yPixelStride: Int,
+                                  uPixelStride: Int,
+                                  vPixelStride: Int)
+
+    external fun copyFromQueueToImage(image: Image, removeFromQueue: Boolean)
+
+    external fun copyYUVBuffer(image: Image): ByteArray //  hits buffer overflow
+
+    external fun copyToImage(yuv420: YUV420, image: Image)
 }

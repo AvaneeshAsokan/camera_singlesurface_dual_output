@@ -35,17 +35,22 @@ import androidx.core.performance.play.services.PlayServicesDevicePerformance
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.qdev.singlesurfacedualquality.databinding.ActivityMainBinding
+import com.qdev.singlesurfacedualquality.utils.CircularArrayQueue
 import com.qdev.singlesurfacedualquality.utils.InputSurface
 import com.qdev.singlesurfacedualquality.utils.OutputSurface
 import com.qdev.singlesurfacedualquality.utils.YuvUtils
 import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
+import kotlin.system.measureTimeMillis
 
 
 class MainActivity : AppCompatActivity() {
@@ -62,6 +67,8 @@ class MainActivity : AppCompatActivity() {
     private var encodeLqHandler: Handler? = null
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
+    private var processThread: HandlerThread? = null
+    private var processHandler: Handler? = null
     private var cameraDevice: CameraDevice? = null
     private var previewSession: CameraCaptureSession? = null
     private var captureSession: CameraCaptureSession? = null
@@ -79,7 +86,6 @@ class MainActivity : AppCompatActivity() {
     private var decoderStarted: Boolean = false
     private var isHighQualityMuxerStarted: Boolean = false
     private var isLowQualityMuxerStarted: Boolean = false
-
     private var semaphore: Semaphore = Semaphore(1)
 
     private val FRAGMENT_SHADER: String =
@@ -88,17 +94,84 @@ class MainActivity : AppCompatActivity() {
     private val imReaderBufferInfo = MediaCodec.BufferInfo()
     private var hqDone: AtomicBoolean = AtomicBoolean(false)
     private var lqDone: AtomicBoolean = AtomicBoolean(false)
+
     //  the frame counts for each output file
     private var hqFrameCount: Int = 0
     private var lqFrameCount: Int = 0
+
     //  the output file counts
     private var hqFileCount: Int = 0
     private var lqFileCount: Int = 0
 
+    private lateinit var queue: CircularArrayQueue
+
     private val imageListener = ImageReader.OnImageAvailableListener { reader ->
         val cameraImage = reader.acquireLatestImage() ?: return@OnImageAvailableListener
 
-        Log.d(TAG, "onImageAvailable: image format ${cameraImage.format}, plane 0 size ${cameraImage.planes[0].buffer.remaining()}")
+        if (isRecording) {
+            val timeToCreateQueueEntry = measureTimeMillis {
+                if (!this::queue.isInitialized){
+                    queue = CircularArrayQueue(
+                        6,
+                        cameraImage.planes[0].buffer.capacity(),
+                        cameraImage.planes[1].buffer.capacity(),
+                        cameraImage.planes[2].buffer.capacity()
+                    )
+                }
+
+                queue.enqueue(
+                    width = cameraImage.width,
+                    height = cameraImage.height,
+                    y = cameraImage.planes[0].buffer,
+                    u = cameraImage.planes[1].buffer,
+                    v = cameraImage.planes[2].buffer,
+                    yRowStride = cameraImage.planes[0].rowStride,
+                    uRowStride = cameraImage.planes[1].rowStride,
+                    vRowStride = cameraImage.planes[2].rowStride,
+                    yPixelStride = cameraImage.planes[0].pixelStride,
+                    uPixelStride = cameraImage.planes[1].pixelStride,
+                    vPixelStride = cameraImage.planes[2].pixelStride,
+                    timestampUs = cameraImage.timestamp
+                )
+            }
+            cameraImage.close()
+            Log.d(TAG, "onImageAvailable: time taken to add to queue $timeToCreateQueueEntry ms")
+        } else {
+            cameraImage.close()
+        }
+
+        /*val planes = cameraImage.planes
+        val yBuffer = planes[0].buffer
+        val uBuffer = planes[1].buffer
+        val vBuffer = planes[2].buffer
+
+        // Get the strides and buffer sizes
+        val yRowStride = planes[0].rowStride
+        val uRowStride = planes[1].rowStride
+        val vRowStride = planes[2].rowStride
+
+        val yPixelStride = planes[0].pixelStride
+        val uPixelStride = planes[1].pixelStride
+        val vPixelStride = planes[2].pixelStride
+
+        Log.d(TAG, "onImageAvailable: yRowStride = $yRowStride, uRowStride = $uRowStride, vRowStride = $vRowStride")
+        Log.d(TAG, "onImageAvailable: yPixelStride = $yPixelStride, uPixelStride = $uPixelStride, vPixelStride = $vPixelStride")
+
+        YuvUtils.addToNativeQueue(
+            yBuffer,
+            uBuffer,
+            vBuffer,
+            yRowStride,
+            uRowStride,
+            vRowStride,
+            yPixelStride,
+            uPixelStride,
+            vPixelStride
+        )
+
+        cameraImage.close()*/
+
+        /*Log.d(TAG, "onImageAvailable: image format ${cameraImage.format}, plane 0 size ${cameraImage.planes[0].buffer.remaining()}")
 
         encodeHandler?.post {
             handleHqInputBuffers(cameraImage)
@@ -165,33 +238,141 @@ class MainActivity : AppCompatActivity() {
             imageReader?.setOnImageAvailableListener(null, null)
             imageReader?.close()
             imageReader = null
+        }*/
+    }
+
+    private fun processQueue() {
+        val corePoolSize = 4
+        val maximumPoolSize = corePoolSize * 4
+        val keepAliveTime = 100L
+        val workQueue = SynchronousQueue<Runnable>()
+        val workerPool: ExecutorService = ThreadPoolExecutor(
+            corePoolSize, maximumPoolSize, keepAliveTime, TimeUnit.SECONDS, workQueue
+        )
+
+        while (true) {
+            if (!this::queue.isInitialized || queue.isEmpty()) {
+                Thread.sleep(10)
+                continue
+            }
+
+            val cameraImage = queue.dequeue() ?: return
+
+            workerPool.submit {
+                handleHqInputBuffers(cameraImage)
+                handleHqCodecOutputBuffer()
+            }
+            workerPool.submit {
+                handleLqInputBuffers(cameraImage)
+                handleLqCodecOutputBuffer()
+            }
+
+            /*encodeHandler?.post {
+                handleHqInputBuffers(cameraImage)
+                Log.d(TAG, "processQueue: hq input taken ${System.currentTimeMillis() - startTime} ms")
+                hqDone.set(true)
+                handleHqCodecOutputBuffer()
+            }*/
+            /*encodeLqHandler?.post {
+                handleLqInputBuffers(cameraImage)
+                Log.d(TAG, "processQueue: lq input taken ${System.currentTimeMillis() - startTime} ms")
+                lqDone.set(true)
+                handleLqCodecOutputBuffer()
+            }*/
+
+            /*while (!hqDone.get() || !lqDone.get()) {
+                Thread.sleep(10)
+                Log.d(TAG, "processQueue: waiting for hq and lq to finish")
+            }
+            if (semaphore.tryAcquire(1, 100, TimeUnit.MILLISECONDS)) {
+                cameraImage?.close()
+                Log.d(TAG, "processQueue: image closed after ${System.currentTimeMillis() - startTime} ms")
+                semaphore.release()
+            }*/
+
+            hqDone.set(false)
+            lqDone.set(false)
+
+            if (!isRecording) {
+                try {
+                    mediaCodec?.stop()
+                } catch (e: IllegalStateException) {
+                    e.printStackTrace()
+                } finally {
+                    mediaCodec?.release()
+                    mediaCodec = null
+                }
+
+                try {
+                    isHighQualityMuxerStarted = false
+                    hqMuxer?.stop()
+                } catch (e: IllegalStateException) {
+                    e.printStackTrace()
+                } finally {
+                    hqMuxer?.release()
+                    hqMuxer = null
+                }
+
+                try {
+                    lqMediaCodec?.stop()
+                } catch (e: IllegalStateException) {
+                    e.printStackTrace()
+                } finally {
+                    lqMediaCodec?.release()
+                    lqMediaCodec = null
+                }
+
+                try {
+                    isLowQualityMuxerStarted = false
+                    lqMuxer?.stop()
+                } catch (e: IllegalStateException) {
+                    e.printStackTrace()
+                } finally {
+                    lqMuxer?.release()
+                    lqMuxer = null
+                }
+
+                imageReader?.setOnImageAvailableListener(null, null)
+                imageReader?.close()
+                imageReader = null
+
+                break
+            }
         }
     }
 
-    private fun handleHqInputBuffers(cameraImage: Image) {
+    private fun handleHqInputBuffers(/*cameraImage: Image*/ cameraImage: YUV420) {
         if (semaphore.tryAcquire(100, TimeUnit.MILLISECONDS)) {
             val index = mediaCodec?.dequeueInputBuffer(0)
             if (index != null && index >= 0) {
                 val inBuff = mediaCodec?.getInputBuffer(index)
+
                 if ((inBuff?.capacity() ?: -1) >= 0) {
                     //  copy the ImageReader image to the input image
-                    val inputImage = mediaCodec?.getInputImage(index)
-                    inputImage?.let {
-                        YuvUtils.copyYUV(cameraImage, it)
-
-                        mediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
-                            0,/* size = */
-                            it.planes[0].buffer.remaining(),/* presentationTimeUs = */
-                            cameraImage.timestamp / 1000,/* flags = */
-                            if (isRecording) {
-                                if (hqFrameCount == 300){
-                                    MediaCodec.BUFFER_FLAG_KEY_FRAME
-                                } else {
-                                    0
-                                }
-                            } else MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                        )
+                    val timeToAcquire = measureTimeMillis {
+                        val inputImage = mediaCodec?.getInputImage(index)
+                        inputImage?.let {
+//                        YuvUtils.copyYUV(cameraImage, it)
+                            val timeToCopy = measureTimeMillis {
+                                YuvUtils.copyToImage(cameraImage, it)
+                            }
+                            Log.d(TAG, "handleHqInputBuffers: time to copy ${timeToCopy} ms")
+                            hqDone.set(true)
+                            mediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
+                                0,/* size = */
+                                it.planes[0].buffer.remaining(),/* presentationTimeUs = */
+                                cameraImage.timestampUs / 1000,/* flags = */
+                                if (isRecording) {
+                                    if (hqFrameCount == 300) {
+                                        MediaCodec.BUFFER_FLAG_KEY_FRAME
+                                    } else {
+                                        0
+                                    }
+                                } else MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                            )
+                        }
                     }
+                    Log.d(TAG, "handleHqInputBuffers: time to acquire ${timeToAcquire} ms")
                 } else {
                     mediaCodec?.queueInputBuffer(index, 0, 0, 0, if (isRecording) 0 else MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                 }
@@ -202,7 +383,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun handleLqInputBuffers(cameraImage: Image) {
+    private fun handleLqInputBuffers(/*cameraImage: Image*/ cameraImage: YUV420) {
         if (semaphore.tryAcquire(100, TimeUnit.MILLISECONDS)) {
             val index = lqMediaCodec?.dequeueInputBuffer(0)
             if (index != null && index >= 0) {
@@ -211,12 +392,16 @@ class MainActivity : AppCompatActivity() {
                     //  copy the ImageReader image to the input image
                     val inputImage = lqMediaCodec?.getInputImage(index)
                     inputImage?.let {
-                        YuvUtils.copyYUV(cameraImage, it)
-
+//                        YuvUtils.copyYUV(cameraImage, it)
+                        val timeToCopy = measureTimeMillis {
+                            YuvUtils.copyToImage(cameraImage, it)
+                        }
+                        Log.d(TAG, "handleLqInputBuffers: time to copy ${timeToCopy} ms")
+                        lqDone.set(true)
                         lqMediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
                             0,/* size = */
                             it.planes[0].buffer.remaining(),/* presentationTimeUs = */
-                            cameraImage.timestamp / 1000,/* flags = */
+                            cameraImage.timestampUs / 1000,/* flags = */
                             if (isRecording) {
                                 if (lqFrameCount == 300) {
                                     MediaCodec.BUFFER_FLAG_KEY_FRAME
@@ -503,6 +688,9 @@ class MainActivity : AppCompatActivity() {
                         )
 //                        hqCodecStarted = true
 //                        encodeFrames()
+                        processHandler?.post {
+                            processQueue()
+                        }
                     } catch (e: CameraAccessException) {
                         e.printStackTrace()
                     }
@@ -575,10 +763,16 @@ class MainActivity : AppCompatActivity() {
             encodeLqHandler = Handler(encodeLqThread!!.looper)
         }
 
+        if (processThread == null || processHandler == null) {
+            processThread = HandlerThread("ProcessThread")
+            processThread!!.start()
+            processHandler = Handler(processThread!!.looper)
+        }
+
         try {
             mediaCodec = MediaCodec.createEncoderByType("video/avc")
 
-            val format = MediaFormat.createVideoFormat("video/avc", 1920, 1080)
+            val format = MediaFormat.createVideoFormat("video/avc", 3840, 2160)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 6 * 1000 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
@@ -593,7 +787,7 @@ class MainActivity : AppCompatActivity() {
         try {
             lqMediaCodec = MediaCodec.createEncoderByType("video/avc")
 
-            val format = MediaFormat.createVideoFormat("video/avc", 1920, 1080)
+            val format = MediaFormat.createVideoFormat("video/avc", 3840, 2160)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 500 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
@@ -607,7 +801,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         imageReader?.close()
-        imageReader = ImageReader.newInstance(1920, 1080, android.graphics.ImageFormat.YUV_420_888, 4)
+        imageReader = ImageReader.newInstance(3840, 2160, android.graphics.ImageFormat.YUV_420_888, 4)
         imageReader?.setOnImageAvailableListener(imageListener, backgroundHandler)
     }
 
@@ -934,8 +1128,24 @@ class MainActivity : AppCompatActivity() {
 }
 
 class YUV420(
-    val width: Int, val height: Int, val y: ByteBuffer, val u: ByteBuffer, val v: ByteBuffer, val timestampUs: Long
-)
+    var width: Int,
+    var height: Int,
+    var y: ByteBuffer,
+    var u: ByteBuffer,
+    var v: ByteBuffer,
+    var yRowStride: Int,
+    var uRowStride: Int,
+    var vRowStride: Int,
+    var yPixelStride: Int,
+    var uPixelStride: Int,
+    var vPixelStride: Int,
+    var timestampUs: Long
+) {
+    var yBuffer: ByteBuffer = y.makeCopy()
+    var uBuffer: ByteBuffer = u.makeCopy()
+    var vBuffer: ByteBuffer = v.makeCopy()
+
+}
 
 //  extension function to copy the ByteBuffer
 private fun ByteBuffer.makeCopy(): ByteBuffer {
