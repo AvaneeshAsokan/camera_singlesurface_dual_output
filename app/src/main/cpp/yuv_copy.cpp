@@ -292,6 +292,9 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage2(
     static jmethodID getBufferMethodID = env->GetMethodID(planeClass, "getBuffer", "()Ljava/nio/ByteBuffer;");
     static jmethodID getRowStrideMethodID = env->GetMethodID(planeClass, "getRowStride", "()I");
     static jmethodID getPixelStrideMethodID = env->GetMethodID(planeClass, "getPixelStride", "()I");
+    //  method to get the timestamp
+    static jmethodID setTimestampMethodID = env->GetMethodID(imageClass, "setTimestamp", "(J)V");
+    static jmethodID getTimestampMethodID = env->GetMethodID(imageClass, "getTimestamp", "()J");
 
     // Get the ByteBuffers from the Image.Planes
     jobject yPlaneBuffer = env->CallObjectMethod(yPlane, getBufferMethodID);

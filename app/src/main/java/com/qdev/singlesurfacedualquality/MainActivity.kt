@@ -131,6 +131,7 @@ class MainActivity : AppCompatActivity() {
                 Log.d(TAG, "onImageAvailable: to queue frame time stamp = ${cameraImage.timestamp}")
             }
 
+            val timestamp = cameraImage.timestamp
 
             //  enqueue the image to the kotlin queue
             /*val timeToCreateQueueEntry = measureTimeMillis {
@@ -161,8 +162,8 @@ class MainActivity : AppCompatActivity() {
             cameraImage.close()
             Log.d(TAG, "onImageAvailable: time taken to add to queue $timeToCreateQueueEntry ms")
 
-            handleHqInputBuffers()
-            handleLqInputBuffers()
+            handleHqInputBuffers(timestamp)
+            handleLqInputBuffers(timestamp)
             handleHqCodecOutputBuffer()
             handleLqCodecOutputBuffer()
 
@@ -346,8 +347,8 @@ class MainActivity : AppCompatActivity() {
 //            val cameraImage = queue.dequeue() ?: return
 
             workerPool.submit {
-                handleHqInputBuffers(/*cameraImage*/)
-                handleLqInputBuffers(/*cameraImage*/)
+//                handleHqInputBuffers()
+//                handleLqInputBuffers()
             }
             workerPool.submit {
                 handleHqCodecOutputBuffer()
@@ -428,7 +429,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun handleHqInputBuffers(/*cameraImage: Image*/ /*cameraImage: YUV420*/) {
+    private fun handleHqInputBuffers(timestamp: Long) {
         if (semaphore.tryAcquire(100, TimeUnit.MILLISECONDS)) {
             val index = mediaCodec?.dequeueInputBuffer(500)
             if (index != null && index >= 0) {
@@ -445,12 +446,11 @@ class MainActivity : AppCompatActivity() {
                         }
                         Log.d(TAG, "handleHqInputBuffers: time to copy ${timeToCopy} ms")
                         hqDone.set(true)
-                        Log.d(TAG, "handleHqInputBuffers: received frame with timestamp ${it.timestamp}")
                         mediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
                             0,/* size = */
                             it.planes[0].buffer.remaining(),/* presentationTimeUs = */
                             /*cameraImage.timestampUs / 1000*/
-                            it.timestamp ,/* flags = */
+                            timestamp/1000 ,/* flags = */
                             if (isRecording) {
                                 if (hqFrameCount == 300) {
                                     MediaCodec.BUFFER_FLAG_KEY_FRAME
@@ -470,7 +470,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun handleLqInputBuffers(/*cameraImage: Image*/ /*cameraImage: YUV420*/) {
+    private fun handleLqInputBuffers(timestamp: Long) {
         if (semaphore.tryAcquire(100, TimeUnit.MILLISECONDS)) {
             val index = lqMediaCodec?.dequeueInputBuffer(0)
             if (index != null && index >= 0) {
@@ -490,7 +490,7 @@ class MainActivity : AppCompatActivity() {
                             0,/* size = */
                             it.planes[0].buffer.remaining(),/* presentationTimeUs = */
                             /*cameraImage.timestampUs / 1000*/
-                            it.timestamp ,/* flags = */
+                            timestamp/1000 ,/* flags = */
                             if (isRecording) {
                                 if (lqFrameCount == 300) {
                                     MediaCodec.BUFFER_FLAG_KEY_FRAME
