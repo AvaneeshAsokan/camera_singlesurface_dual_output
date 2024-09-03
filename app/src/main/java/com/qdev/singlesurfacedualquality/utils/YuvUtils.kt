@@ -19,9 +19,14 @@ object YuvUtils {
                                   vRowStride: Int,
                                   yPixelStride: Int,
                                   uPixelStride: Int,
-                                  vPixelStride: Int)
+                                  vPixelStride: Int,
+                                  timestamp: Long)
 
-    external fun copyFromQueueToImage(image: Image, removeFromQueue: Boolean)
+    external fun isQueueEmpty(): Boolean
+
+    /*external fun copyFromQueueToImage(image: Image, removeFromQueue: Boolean): Boolean*/
+
+    external fun copyToImage2(image: Image, removeFromQueue: Boolean)
 
     external fun copyYUVBuffer(image: Image): ByteArray //  hits buffer overflow
 

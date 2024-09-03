@@ -44,8 +44,8 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.Semaphore
-import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -107,9 +107,32 @@ class MainActivity : AppCompatActivity() {
 
     private val imageListener = ImageReader.OnImageAvailableListener { reader ->
         val cameraImage = reader.acquireLatestImage() ?: return@OnImageAvailableListener
+//        Log.d(TAG, "onImageAvailable: plane 0: Buffer size = ${cameraImage.planes[0].buffer.remaining()}, " +
+//                "plane 1: Buffer size = ${cameraImage.planes[1].buffer.remaining()}, \n" +
+//                "plane 2: Buffer size = ${cameraImage.planes[2].buffer.remaining()} \n" +
+//                "width * height = ${cameraImage.width * cameraImage.height} \n" +
+//                "width * height / 4 = ${(cameraImage.width / 2) * (cameraImage.height / 2)}")
 
         if (isRecording) {
+            //  enqueue the image to the NDK queue
             val timeToCreateQueueEntry = measureTimeMillis {
+                YuvUtils.addToNativeQueue(
+                    yData = cameraImage.planes[0].buffer,
+                    uData = cameraImage.planes[1].buffer,
+                    vData = cameraImage.planes[2].buffer,
+                    yRowStride = cameraImage.planes[0].rowStride,
+                    uRowStride = cameraImage.planes[1].rowStride,
+                    vRowStride = cameraImage.planes[2].rowStride,
+                    yPixelStride = cameraImage.planes[0].pixelStride,
+                    uPixelStride = cameraImage.planes[1].pixelStride,
+                    vPixelStride = cameraImage.planes[2].pixelStride,
+                    timestamp = cameraImage.timestamp
+                )
+            }
+
+
+            //  enqueue the image to the kotlin queue
+            /*val timeToCreateQueueEntry = measureTimeMillis {
                 if (!this::queue.isInitialized){
                     queue = CircularArrayQueue(
                         6,
@@ -133,7 +156,7 @@ class MainActivity : AppCompatActivity() {
                     vPixelStride = cameraImage.planes[2].pixelStride,
                     timestampUs = cameraImage.timestamp
                 )
-            }
+            }*/
             cameraImage.close()
             Log.d(TAG, "onImageAvailable: time taken to add to queue $timeToCreateQueueEntry ms")
         } else {
@@ -245,25 +268,30 @@ class MainActivity : AppCompatActivity() {
         val corePoolSize = 4
         val maximumPoolSize = corePoolSize * 4
         val keepAliveTime = 100L
-        val workQueue = SynchronousQueue<Runnable>()
+        val workQueue = /*SynchronousQueue<Runnable>()*/ LinkedBlockingQueue<Runnable>()
         val workerPool: ExecutorService = ThreadPoolExecutor(
             corePoolSize, maximumPoolSize, keepAliveTime, TimeUnit.SECONDS, workQueue
         )
 
         while (true) {
-            if (!this::queue.isInitialized || queue.isEmpty()) {
+            /*if (!this::queue.isInitialized || queue.isEmpty()) {
                 Thread.sleep(10)
+                continue
+            }*/
+
+            if (YuvUtils.isQueueEmpty()) {
+                Thread.sleep(5)
                 continue
             }
 
-            val cameraImage = queue.dequeue() ?: return
+//            val cameraImage = queue.dequeue() ?: return
 
             workerPool.submit {
-                handleHqInputBuffers(cameraImage)
-                handleHqCodecOutputBuffer()
+                handleHqInputBuffers(/*cameraImage*/)
+                handleLqInputBuffers(/*cameraImage*/)
             }
             workerPool.submit {
-                handleLqInputBuffers(cameraImage)
+                handleHqCodecOutputBuffer()
                 handleLqCodecOutputBuffer()
             }
 
@@ -341,38 +369,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun handleHqInputBuffers(/*cameraImage: Image*/ cameraImage: YUV420) {
+    private fun handleHqInputBuffers(/*cameraImage: Image*/ /*cameraImage: YUV420*/) {
         if (semaphore.tryAcquire(100, TimeUnit.MILLISECONDS)) {
-            val index = mediaCodec?.dequeueInputBuffer(0)
+            val index = mediaCodec?.dequeueInputBuffer(500)
             if (index != null && index >= 0) {
                 val inBuff = mediaCodec?.getInputBuffer(index)
 
                 if ((inBuff?.capacity() ?: -1) >= 0) {
                     //  copy the ImageReader image to the input image
-                    val timeToAcquire = measureTimeMillis {
-                        val inputImage = mediaCodec?.getInputImage(index)
-                        inputImage?.let {
+                    val inputImage = mediaCodec?.getInputImage(index)
+                    inputImage?.let {
 //                        YuvUtils.copyYUV(cameraImage, it)
-                            val timeToCopy = measureTimeMillis {
-                                YuvUtils.copyToImage(cameraImage, it)
-                            }
-                            Log.d(TAG, "handleHqInputBuffers: time to copy ${timeToCopy} ms")
-                            hqDone.set(true)
-                            mediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
-                                0,/* size = */
-                                it.planes[0].buffer.remaining(),/* presentationTimeUs = */
-                                cameraImage.timestampUs / 1000,/* flags = */
-                                if (isRecording) {
-                                    if (hqFrameCount == 300) {
-                                        MediaCodec.BUFFER_FLAG_KEY_FRAME
-                                    } else {
-                                        0
-                                    }
-                                } else MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                            )
+                        val timeToCopy = measureTimeMillis {
+//                                YuvUtils.copyToImage(cameraImage, it)
+                            YuvUtils.copyToImage2(it, false)
                         }
+                        Log.d(TAG, "handleHqInputBuffers: time to copy ${timeToCopy} ms")
+                        hqDone.set(true)
+                        mediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
+                            0,/* size = */
+                            it.planes[0].buffer.remaining(),/* presentationTimeUs = */
+                            /*cameraImage.timestampUs / 1000*/
+                            it.timestamp / 1000,/* flags = */
+                            if (isRecording) {
+                                if (hqFrameCount == 300) {
+                                    MediaCodec.BUFFER_FLAG_KEY_FRAME
+                                } else {
+                                    0
+                                }
+                            } else MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                        )
                     }
-                    Log.d(TAG, "handleHqInputBuffers: time to acquire ${timeToAcquire} ms")
                 } else {
                     mediaCodec?.queueInputBuffer(index, 0, 0, 0, if (isRecording) 0 else MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                 }
@@ -383,7 +410,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun handleLqInputBuffers(/*cameraImage: Image*/ cameraImage: YUV420) {
+    private fun handleLqInputBuffers(/*cameraImage: Image*/ /*cameraImage: YUV420*/) {
         if (semaphore.tryAcquire(100, TimeUnit.MILLISECONDS)) {
             val index = lqMediaCodec?.dequeueInputBuffer(0)
             if (index != null && index >= 0) {
@@ -394,14 +421,16 @@ class MainActivity : AppCompatActivity() {
                     inputImage?.let {
 //                        YuvUtils.copyYUV(cameraImage, it)
                         val timeToCopy = measureTimeMillis {
-                            YuvUtils.copyToImage(cameraImage, it)
+//                            YuvUtils.copyToImage(cameraImage, it)
+                            YuvUtils.copyToImage2(it, true)
                         }
                         Log.d(TAG, "handleLqInputBuffers: time to copy ${timeToCopy} ms")
                         lqDone.set(true)
                         lqMediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
                             0,/* size = */
                             it.planes[0].buffer.remaining(),/* presentationTimeUs = */
-                            cameraImage.timestampUs / 1000,/* flags = */
+                            /*cameraImage.timestampUs / 1000*/
+                            it.timestamp / 1000,/* flags = */
                             if (isRecording) {
                                 if (lqFrameCount == 300) {
                                     MediaCodec.BUFFER_FLAG_KEY_FRAME
@@ -801,7 +830,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         imageReader?.close()
-        imageReader = ImageReader.newInstance(3840, 2160, android.graphics.ImageFormat.YUV_420_888, 4)
+        imageReader = ImageReader.newInstance(3840, 2160, android.graphics.ImageFormat.YUV_420_888, 2)
         imageReader?.setOnImageAvailableListener(imageListener, backgroundHandler)
     }
 

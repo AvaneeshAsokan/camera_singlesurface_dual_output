@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <mutex>
 #include <thread>
+#include <condition_variable>
 
 #include <android/bitmap.h>
 #include <media/NdkImage.h>
@@ -19,29 +20,147 @@
 
 std::mutex copyMutex;
 
-struct YUVBuffer {
-    std::vector<uint8_t> byteBuffer; // Stores the byte buffer data
-    int pixelStride;                 // Pixel stride for this buffer
-    int rowStride;                   // Row stride for this buffer
+struct YUVImagePlane {
+    std::vector<uint8_t> byteBuffer;
+    int pixelStride;
+    int rowStride;
 
-    YUVBuffer(int bufferSize, int pStride, int rStride)
-            : byteBuffer(bufferSize), pixelStride(pStride), rowStride(rStride) {}
+    YUVImagePlane(int size, int pixelStride, int rowStride)
+            : byteBuffer(size), pixelStride(pixelStride), rowStride(rowStride) {}
 };
 
-struct YUVImage {
-    std::vector<YUVBuffer> buffers;  // Array of YUVBuffer objects
+class YUV420 {
+public:
+    int width;
+    int height;
+    long long timestampUs;
+    std::vector<YUVImagePlane> planes;
 
-    YUVImage(int numBuffers) {
-        buffers.reserve(numBuffers); // Preallocate space for the buffers
+    YUV420(int width, int height, long long timestampUs)
+            : width(width), height(height), timestampUs(timestampUs) {
+        // Pre-allocate planes for Y, U, and V
+        planes.emplace_back(width * height, 1, width);  // Y plane
+        planes.emplace_back(width * height / 2, 2, width);  // U plane
+        planes.emplace_back(width * height / 2, 2, width);  // V plane
     }
 
-    void addBuffer(int bufferSize, int pixelStride, int rowStride) {
-        buffers.emplace_back(bufferSize, pixelStride, rowStride);
+    void update(int width, int height, long long timestampUs,
+                const uint8_t *yData, int yRowStride, int yPixelStride,
+                const uint8_t *uData, int uRowStride, int uPixelStride,
+                const uint8_t *vData, int vRowStride, int vPixelStride) {
+        this->width = width;
+        this->height = height;
+        this->timestampUs = timestampUs;
+
+        // Update Y plane
+        planes[0].rowStride = yRowStride;
+        planes[0].pixelStride = yPixelStride;
+        memcpy(planes[0].byteBuffer.data(), yData, width * height);
+
+        // Update U plane
+        planes[1].rowStride = uRowStride;
+        planes[1].pixelStride = uPixelStride;
+        memcpy(planes[1].byteBuffer.data(), uData, width * height / 2);
+
+        // Update V plane
+        planes[2].rowStride = vRowStride;
+        planes[2].pixelStride = vPixelStride;
+        memcpy(planes[2].byteBuffer.data(), vData, width * height / 2);
     }
 };
+
+class CircularArrayQueue {
+private:
+    std::vector<YUV420> queue;
+    int front;
+    int rear;
+    int size;
+    int capacity;
+    std::mutex mutex;
+    std::condition_variable notFull, notEmpty;
+
+public:
+    CircularArrayQueue(int capacity, int width, int height)
+            : queue(capacity, YUV420(width, height, 0)), front(0), rear(-1), size(0), capacity(capacity) {}
+
+    void enqueue(int width, int height, long long timestampUs,
+                 const uint8_t *yData, int yRowStride, int yPixelStride,
+                 const uint8_t *uData, int uRowStride, int uPixelStride,
+                 const uint8_t *vData, int vRowStride, int vPixelStride) {
+        std::unique_lock<std::mutex> lock(mutex);
+        notFull.wait(lock, [this] { return size < capacity; });
+
+        rear = (rear + 1) % capacity;
+        queue[rear].update(width, height, timestampUs,
+                           yData, yRowStride, yPixelStride,
+                           uData, uRowStride, uPixelStride,
+                           vData, vRowStride, vPixelStride);
+        size++;
+
+        lock.unlock();
+        notEmpty.notify_one();
+    }
+
+    YUV420 dequeue() {
+        std::unique_lock<std::mutex> lock(mutex);
+        notEmpty.wait(lock, [this] { return size > 0; });
+
+        YUV420 item = queue[front];
+        front = (front + 1) % capacity;
+        size--;
+
+        lock.unlock();
+        notFull.notify_one();
+        return item;
+    }
+
+    YUV420 peek() {
+        std::unique_lock<std::mutex> lock(mutex);
+        notEmpty.wait(lock, [this] { return size > 0; });
+
+        YUV420 item = queue[front];
+
+        lock.unlock();
+        return item;
+    }
+
+    bool isEmpty() const {
+        return size == 0;
+    }
+
+    bool isFull() const {
+        return size == capacity;
+    }
+
+    int getSize() const {
+        return size;
+    }
+};
+
+CircularArrayQueue yuvQueue(5, 3840, 2160);
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_addToNativeQueue(JNIEnv *env, jobject thiz, jobject y_data, jobject u_data, jobject v_data,
+                                                                       jint y_row_stride, jint u_row_stride, jint v_row_stride, jint y_pixel_stride,
+                                                                       jint u_pixel_stride, jint v_pixel_stride, jlong timestamp_us) {
+    // TODO: implement addToNativeQueue()
+    yuvQueue.enqueue(3840, 2160, timestamp_us,
+                     static_cast<const uint8_t *>(env->GetDirectBufferAddress(y_data)), y_row_stride, y_pixel_stride,
+                     static_cast<const uint8_t *>(env->GetDirectBufferAddress(u_data)), u_row_stride, u_pixel_stride,
+                     static_cast<const uint8_t *>(env->GetDirectBufferAddress(v_data)), v_row_stride, v_pixel_stride);
+
+    LOGI("Native YUV queue size: %d", yuvQueue.getSize());
+}
+
+//function to return if the queue is empty
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_isQueueEmpty(JNIEnv *env, jobject thiz) {
+    return yuvQueue.isEmpty();
+}
 
 JavaVM *gJvm = nullptr; // Store the JavaVM reference
-std::queue<YUVImage> yuvImageQueue; // Queue to store YUVImage objects
 std::mutex queueMutex;
 
 extern "C"
@@ -102,188 +221,181 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyYUV(JNIEnv *env, jobje
     }
 }
 
-
-/*extern "C"
-JNIEXPORT void JNICALL
-Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_addToNativeQueue(
-        JNIEnv* env,
-        jobject *//* this *//*,
-        jbyteArray yData,
-        jbyteArray uData,
-        jbyteArray vData,
-        jint yRowStride,
-        jint uRowStride,
-        jint vRowStride,
-        jint yPixelStride,
-        jint uPixelStride,
-        jint vPixelStride) {
-
-    // Lock the mutex
-    std::lock_guard<std::mutex> lock(queueMutex);
-
-    // Create a new YUVImage object
-    YUVImage image(3);
-
-    // Get the Y data
-    jbyte* yPtr = env->GetByteArrayElements(yData, NULL);
-    int ySize = env->GetArrayLength(yData);
-    image.addBuffer(ySize, yPixelStride, yRowStride);
-    std::copy(yPtr, yPtr + ySize, image.buffers[0].byteBuffer.begin());
-    env->ReleaseByteArrayElements(yData, yPtr, 0);
-
-    // Get the U data
-    jbyte* uPtr = env->GetByteArrayElements(uData, NULL);
-    int uSize = env->GetArrayLength(uData);
-    image.addBuffer(uSize, uPixelStride, uRowStride);
-    std::copy(uPtr, uPtr + uSize, image.buffers[1].byteBuffer.begin());
-    env->ReleaseByteArrayElements(uData, uPtr, 0);
-
-    // Get the V data
-    jbyte* vPtr = env->GetByteArrayElements(vData, NULL);
-    int vSize = env->GetArrayLength(vData);
-    image.addBuffer(vSize, vPixelStride, vRowStride);
-    std::copy(vPtr, vPtr + vSize, image.buffers[2].byteBuffer.begin());
-    env->ReleaseByteArrayElements(vData, vPtr, 0);
-
-    // Add the YUVImage to the queue
-    yuvImageQueue.push(image);
-    //  log the size of the queue
-    LOGI("Queue size: %d", yuvImageQueue.size());
-}*/
-
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_addToNativeQueue(
+Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage2(
         JNIEnv *env,
         jobject /* this */,
-        jobject yBuffer,   // ByteBuffer
-        jobject uBuffer,   // ByteBuffer
-        jobject vBuffer,   // ByteBuffer
-        jint yRowStride,
-        jint uRowStride,
-        jint vRowStride,
-        jint yPixelStride,
-        jint uPixelStride,
-        jint vPixelStride) {
+        jobject image,  // The Image object from Kotlin
+        jboolean removeFromQueue) {
 
-    // Lock the mutex
-    std::lock_guard<std::mutex> lock(queueMutex);
+    // Check if the queue is empty
+    if (yuvQueue.isEmpty()) {
+        LOGI("Queue is empty.");
+        return;
+    }
 
-    // Create a new YUVImage object
-    YUVImage image(3);
+    // Dequeue the next YUV frame from the circular queue
+    YUV420 yuvFrame = yuvQueue.peek();
+    if (removeFromQueue) {
+        yuvQueue.dequeue();
+    }
 
-    // Create global references for the ByteBuffers
-    jobject yGlobalRef = env->NewGlobalRef(yBuffer);
-    jobject uGlobalRef = env->NewGlobalRef(uBuffer);
-    jobject vGlobalRef = env->NewGlobalRef(vBuffer);
+    //  time to fetch references
+    /*long long startTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();*/
 
+    // Get the Image class and its Plane array
+    jclass imageClass = env->GetObjectClass(image);
+    static jmethodID getPlanesMethodID = env->GetMethodID(imageClass, "getPlanes", "()[Landroid/media/Image$Plane;");
+    jobjectArray planes = static_cast<jobjectArray>(env->CallObjectMethod(image, getPlanesMethodID));
+
+    // Get the Y, U, and V planes from the Image object
+    jobject yPlane = env->GetObjectArrayElement(planes, 0);
+    jobject uPlane = env->GetObjectArrayElement(planes, 1);
+    jobject vPlane = env->GetObjectArrayElement(planes, 2);
+
+    // Plane class and field IDs
+    jclass planeClass = env->GetObjectClass(yPlane);
+    static jmethodID getBufferMethodID = env->GetMethodID(planeClass, "getBuffer", "()Ljava/nio/ByteBuffer;");
+    static jmethodID getRowStrideMethodID = env->GetMethodID(planeClass, "getRowStride", "()I");
+    static jmethodID getPixelStrideMethodID = env->GetMethodID(planeClass, "getPixelStride", "()I");
+
+    // Get the ByteBuffers from the Image.Planes
+    jobject yPlaneBuffer = env->CallObjectMethod(yPlane, getBufferMethodID);
+    jobject uPlaneBuffer = env->CallObjectMethod(uPlane, getBufferMethodID);
+    jobject vPlaneBuffer = env->CallObjectMethod(vPlane, getBufferMethodID);
+
+    auto *yPlanePtr = static_cast<uint8_t *>(env->GetDirectBufferAddress(yPlaneBuffer));
+    auto *uPlanePtr = static_cast<uint8_t *>(env->GetDirectBufferAddress(uPlaneBuffer));
+    auto *vPlanePtr = static_cast<uint8_t *>(env->GetDirectBufferAddress(vPlaneBuffer));
+
+    if (yPlanePtr == nullptr || uPlanePtr == nullptr || vPlanePtr == nullptr) {
+        LOGE("Failed to get direct buffer address.");
+        return;
+    }
+
+    jint yPlaneRowStride = env->CallIntMethod(yPlane, getRowStrideMethodID);
+    jint uPlaneRowStride = env->CallIntMethod(uPlane, getRowStrideMethodID);
+    jint vPlaneRowStride = env->CallIntMethod(vPlane, getRowStrideMethodID);
+    jint yPlanePixelStride = env->CallIntMethod(yPlane, getPixelStrideMethodID);
+    jint uPlanePixelStride = env->CallIntMethod(uPlane, getPixelStrideMethodID);
+    jint vPlanePixelStride = env->CallIntMethod(vPlane, getPixelStrideMethodID);
+
+    // Get the YUV frame data
+    const uint8_t *yPtr = yuvFrame.planes[0].byteBuffer.data();
+    const uint8_t *uPtr = yuvFrame.planes[1].byteBuffer.data();
+    const uint8_t *vPtr = yuvFrame.planes[2].byteBuffer.data();
+    int yRowStride = yuvFrame.planes[0].rowStride;
+    int uRowStride = yuvFrame.planes[1].rowStride;
+    int vRowStride = yuvFrame.planes[2].rowStride;
+    int yPixelStride = yuvFrame.planes[0].pixelStride;
+    int uPixelStride = yuvFrame.planes[1].pixelStride;
+    int vPixelStride = yuvFrame.planes[2].pixelStride;
+    int width = yuvFrame.width;
+    int height = yuvFrame.height;
+    int chromaHeight = height / 2;
+
+    //  time to fetch references
+    /*long long endTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    LOGI("Time to fetch references: %lld", endTime - startTime);*/
+
+    // Define thread functions for copying data
+    auto copyYPlane = [&]() {
+        if (yPixelStride == 1 && yRowStride == yPlaneRowStride && yPlanePixelStride == 1) {
+            memcpy(yPlanePtr, yPtr, height * yRowStride);
+        } else {
+            for (int row = 0; row < height; row++) {
+                memcpy(yPlanePtr + row * yPlaneRowStride, yPtr + row * yRowStride, width);
+            }
+            /*for (int row = 0; row < height; ++row) {
+                uint8_t *src = const_cast<uint8_t *>(yPtr + row * yRowStride);
+                uint8_t *dst = yPlanePtr + row * yPlaneRowStride;
+                if (yPixelStride == 1 && yPlanePixelStride == 1) {
+                    memcpy(dst, src, width);
+                } else {
+                    for (int col = 0; col < width; ++col) {
+                        dst[col * yPlanePixelStride] = src[col * yPixelStride];
+                    }
+                }
+            }*/
+        }
+    };
+
+    auto copyUPlane = [&]() {
+        //  time to copy the U plane
+        if (uPixelStride == 1 && uRowStride == uPlaneRowStride && uPlanePixelStride == 1) {
+            memcpy(uPlanePtr, uPtr, chromaHeight * uRowStride);
+        } else {
+            for (int row = 0; row < chromaHeight; row++) {
+                memcpy(uPlanePtr + row * uPlaneRowStride, uPtr + row * uRowStride, width);
+            }
+            /*for (int row = 0; row < chromaHeight; ++row) {
+                uint8_t *src = const_cast<uint8_t *>(uPtr + row * uRowStride);
+                uint8_t *dst = uPlanePtr + row * uPlaneRowStride;
+                if (uPixelStride == 1 && uPlanePixelStride == 1) {
+                    memcpy(dst, src, width / 2);
+                } else {
+                    for (int col = 0; col < width / 2; ++col) {
+                        dst[col * uPlanePixelStride] = src[col * uPixelStride];
+                    }
+                }
+            }*/
+        }
+    };
+
+    auto copyVPlane = [&]() {
+        //  time to copy the V plane
+        if (vPixelStride == 1 && vRowStride == vPlaneRowStride && vPlanePixelStride == 1) {
+            memcpy(vPlanePtr, vPtr, chromaHeight * vRowStride);
+        } else {
+            for (int row = 0; row < chromaHeight; row++) {
+                memcpy(vPlanePtr + row * vPlaneRowStride, vPtr + row * vRowStride, width);
+            }
+            /*for (int row = 0; row < chromaHeight; ++row) {
+                uint8_t *src = const_cast<uint8_t *>(vPtr + row * vRowStride);
+                uint8_t *dst = vPlanePtr + row * vPlaneRowStride;
+                if (vPixelStride == 1 && vPlanePixelStride == 1) {
+                    memcpy(dst, src, width / 2);
+                } else {
+                    for (int col = 0; col < width / 2; ++col) {
+                        dst[col * vPlanePixelStride] = src[col * vPixelStride];
+                    }
+                }
+            }*/
+        }
+    };
+
+    // Create and run threads for copying each plane
     std::vector<std::thread> threads;
+    threads.emplace_back(copyYPlane);
+    threads.emplace_back(copyUPlane);
+    threads.emplace_back(copyVPlane);
 
-    // Access the Y data
-    threads.emplace_back([&, yGlobalRef]() {
-        JNIEnv* threadEnv;
-        gJvm->AttachCurrentThread(&threadEnv, NULL);
-        uint8_t *yPtr = static_cast<uint8_t *>(threadEnv->GetDirectBufferAddress(yGlobalRef));
-        jlong ySize = threadEnv->GetDirectBufferCapacity(yGlobalRef);
-        image.addBuffer(static_cast<int>(ySize), yPixelStride, yRowStride);
-        memcpy(image.buffers[0].byteBuffer.data(), yPtr, ySize);
-        gJvm->DetachCurrentThread();
-    });
-
-    // Access the U data
-    threads.emplace_back([&, uGlobalRef]() {
-        JNIEnv* threadEnv;
-        gJvm->AttachCurrentThread(&threadEnv, NULL);
-        uint8_t *uPtr = static_cast<uint8_t *>(threadEnv->GetDirectBufferAddress(uGlobalRef));
-        jlong uSize = threadEnv->GetDirectBufferCapacity(uGlobalRef);
-        image.addBuffer(static_cast<int>(uSize), uPixelStride, uRowStride);
-        memcpy(image.buffers[1].byteBuffer.data(), uPtr, uSize);
-        gJvm->DetachCurrentThread();
-    });
-
-    // Access the V data
-    threads.emplace_back([&, vGlobalRef]() {
-        JNIEnv* threadEnv;
-        gJvm->AttachCurrentThread(&threadEnv, NULL);
-        uint8_t *vPtr = static_cast<uint8_t *>(threadEnv->GetDirectBufferAddress(vGlobalRef));
-        jlong vSize = threadEnv->GetDirectBufferCapacity(vGlobalRef);
-        image.addBuffer(static_cast<int>(vSize), vPixelStride, vRowStride);
-        memcpy(image.buffers[2].byteBuffer.data(), vPtr, vSize);
-        gJvm->DetachCurrentThread();
-    });
-
+    // Wait for all threads to finish
     for (auto &thread : threads) {
         thread.join();
     }
 
-    // Delete the global references
-    env->DeleteGlobalRef(yGlobalRef);
-    env->DeleteGlobalRef(uGlobalRef);
-    env->DeleteGlobalRef(vGlobalRef);
+    // Clean up local references
+    env->DeleteLocalRef(yPlane);
+    env->DeleteLocalRef(uPlane);
+    env->DeleteLocalRef(vPlane);
+    env->DeleteLocalRef(planes);
+    env->DeleteLocalRef(imageClass);
 
-    // Add the YUVImage to the queue
-    yuvImageQueue.push(image);
+    // Log to verify successful copying
+    LOGI("Successfully copied YUV data to Image object.");
 
-    // Log the size of the queue
-    LOGI("Queue size: %d", yuvImageQueue.size());
+    return;
 }
 
-//  Function to get the front image from the queue and copy it to the destination image
-extern "C"
-JNIEXPORT void JNICALL
-Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyFromQueueToImage(JNIEnv *env, jobject thiz, jobject dstImage, jboolean removeFromQueue) {
-    // Lock the mutex
-    std::lock_guard<std::mutex> lock(queueMutex);
 
-    jclass destImageClass = env->GetObjectClass(dstImage);
-
-    jmethodID getDestPlanesMethod = env->GetMethodID(destImageClass, "getPlanes", "()[Landroid/media/Image$Plane;");
-    jobjectArray dstPlanes = (jobjectArray) env->CallObjectMethod(dstImage, getDestPlanesMethod);
-
-    jclass planeClass = env->FindClass("android/media/Image$Plane");
-    jmethodID getBufferMethod = env->GetMethodID(planeClass, "getBuffer", "()Ljava/nio/ByteBuffer;");
-    jmethodID getRowStrideMethod = env->GetMethodID(planeClass, "getRowStride", "()I");
-    jmethodID getPixelStrideMethod = env->GetMethodID(planeClass, "getPixelStride", "()I");
-
-    int srcWidth = env->CallIntMethod(dstImage, env->GetMethodID(destImageClass, "getWidth", "()I"));
-    int srcHeight = env->CallIntMethod(dstImage, env->GetMethodID(destImageClass, "getHeight", "()I"));
-
-    YUVImage image = yuvImageQueue.front();
-    if (removeFromQueue) {
-        yuvImageQueue.pop();
-    }
-
-    for (int i = 0; i < 3; i++) {
-        jobject dstPlane = env->GetObjectArrayElement(dstPlanes, i);
-
-        jobject dstBuffer = env->CallObjectMethod(dstPlane, getBufferMethod);
-        int dstRowStride = env->CallIntMethod(dstPlane, getRowStrideMethod);
-        int dstPixelStride = env->CallIntMethod(dstPlane, getPixelStrideMethod);
-
-        uint8_t *dstData = (uint8_t *) env->GetDirectBufferAddress(dstBuffer);
-
-        if (dstData == nullptr) {
-            LOGE("Failed to get direct buffer address.");
-            return;
-        }
-
-        int planeWidth = (i == 0) ? srcWidth : srcWidth / 2;
-        int planeHeight = (i == 0) ? srcHeight : srcHeight / 2;
-
-        for (int row = 0; row < planeHeight; row++) {
-            uint8_t *dstRow = dstData + row * dstRowStride;
-
-            if (dstPixelStride == 1) {
-                memcpy(dstRow, image.buffers[i].byteBuffer.data() + row * image.buffers[i].rowStride, planeWidth);
-            } else {
-                for (int col = 0; col < planeWidth; col++) {
-                    dstRow[col * dstPixelStride] = image.buffers[i].byteBuffer[row * image.buffers[i].rowStride + col * image.buffers[i].pixelStride];
-                }
-            }
-        }
-    }
-}
-
+/**
+ * Function to copy YUV data from a YUV420 object to an Image object
+ */
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage(
@@ -426,7 +538,7 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage(
     threads.emplace_back(copyVPlane);
 
     // Wait for all threads to finish
-    for (auto& thread : threads) {
+    for (auto &thread: threads) {
         thread.join();
     }
 
@@ -439,142 +551,12 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage(
     env->DeleteLocalRef(vPlane);
 }
 
-/*extern "C"
-JNIEXPORT void JNICALL
-Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage(
-        JNIEnv *env,
-        jobject *//* this *//*,
-        jobject yuv420Object,  // YUV420 Kotlin object
-        jobject imageObject    // android.media.Image object
-) {
-    // Get the YUV420 class and field IDs
-    jclass yuv420Class = env->GetObjectClass(yuv420Object);
-
-    // Cache field IDs
-    static jfieldID yBufferFieldID = env->GetFieldID(yuv420Class, "yBuffer", "Ljava/nio/ByteBuffer;");
-    static jfieldID uBufferFieldID = env->GetFieldID(yuv420Class, "uBuffer", "Ljava/nio/ByteBuffer;");
-    static jfieldID vBufferFieldID = env->GetFieldID(yuv420Class, "vBuffer", "Ljava/nio/ByteBuffer;");
-    static jfieldID yRowStrideFieldID = env->GetFieldID(yuv420Class, "yRowStride", "I");
-    static jfieldID uRowStrideFieldID = env->GetFieldID(yuv420Class, "uRowStride", "I");
-    static jfieldID vRowStrideFieldID = env->GetFieldID(yuv420Class, "vRowStride", "I");
-    static jfieldID yPixelStrideFieldID = env->GetFieldID(yuv420Class, "yPixelStride", "I");
-    static jfieldID uPixelStrideFieldID = env->GetFieldID(yuv420Class, "uPixelStride", "I");
-    static jfieldID vPixelStrideFieldID = env->GetFieldID(yuv420Class, "vPixelStride", "I");
-    static jfieldID widthFieldID = env->GetFieldID(yuv420Class, "width", "I");
-    static jfieldID heightFieldID = env->GetFieldID(yuv420Class, "height", "I");
-
-    // Get the ByteBuffers from the YUV420 object
-    jobject yBuffer = env->GetObjectField(yuv420Object, yBufferFieldID);
-    jobject uBuffer = env->GetObjectField(yuv420Object, uBufferFieldID);
-    jobject vBuffer = env->GetObjectField(yuv420Object, vBufferFieldID);
-
-    // Get the strides and sizes from the YUV420 object
-    jint yRowStride = env->GetIntField(yuv420Object, yRowStrideFieldID);
-    jint uRowStride = env->GetIntField(yuv420Object, uRowStrideFieldID);
-    jint vRowStride = env->GetIntField(yuv420Object, vRowStrideFieldID);
-    jint yPixelStride = env->GetIntField(yuv420Object, yPixelStrideFieldID);
-    jint uPixelStride = env->GetIntField(yuv420Object, uPixelStrideFieldID);
-    jint vPixelStride = env->GetIntField(yuv420Object, vPixelStrideFieldID);
-    jint width = env->GetIntField(yuv420Object, widthFieldID);
-    jint height = env->GetIntField(yuv420Object, heightFieldID);
-    jint chromaHeight = height / 2;
-
-    // Get the direct buffer addresses
-    uint8_t *yPtr = static_cast<uint8_t *>(env->GetDirectBufferAddress(yBuffer));
-    uint8_t *uPtr = static_cast<uint8_t *>(env->GetDirectBufferAddress(uBuffer));
-    uint8_t *vPtr = static_cast<uint8_t *>(env->GetDirectBufferAddress(vBuffer));
-
-    // Get the Image class and its Plane array
-    jclass imageClass = env->GetObjectClass(imageObject);
-    static jmethodID getPlanesMethodID = env->GetMethodID(imageClass, "getPlanes", "()[Landroid/media/Image$Plane;");
-    jobjectArray planes = static_cast<jobjectArray>(env->CallObjectMethod(imageObject, getPlanesMethodID));
-
-    // Get the Y, U, and V planes from the Image object
-    jobject yPlane = env->GetObjectArrayElement(planes, 0);
-    jobject uPlane = env->GetObjectArrayElement(planes, 1);
-    jobject vPlane = env->GetObjectArrayElement(planes, 2);
-
-    // Plane class and field IDs
-    jclass planeClass = env->GetObjectClass(yPlane);
-    static jmethodID getBufferMethodID = env->GetMethodID(planeClass, "getBuffer", "()Ljava/nio/ByteBuffer;");
-    static jmethodID getRowStrideMethodID = env->GetMethodID(planeClass, "getRowStride", "()I");
-    static jmethodID getPixelStrideMethodID = env->GetMethodID(planeClass, "getPixelStride", "()I");
-
-    // Get the ByteBuffers from the Image.Planes
-    jobject yPlaneBuffer = env->CallObjectMethod(yPlane, getBufferMethodID);
-    jobject uPlaneBuffer = env->CallObjectMethod(uPlane, getBufferMethodID);
-    jobject vPlaneBuffer = env->CallObjectMethod(vPlane, getBufferMethodID);
-
-    uint8_t *yPlanePtr = static_cast<uint8_t *>(env->GetDirectBufferAddress(yPlaneBuffer));
-    uint8_t *uPlanePtr = static_cast<uint8_t *>(env->GetDirectBufferAddress(uPlaneBuffer));
-    uint8_t *vPlanePtr = static_cast<uint8_t *>(env->GetDirectBufferAddress(vPlaneBuffer));
-
-    jint yPlaneRowStride = env->CallIntMethod(yPlane, getRowStrideMethodID);
-    jint uPlaneRowStride = env->CallIntMethod(uPlane, getRowStrideMethodID);
-    jint vPlaneRowStride = env->CallIntMethod(vPlane, getRowStrideMethodID);
-    jint yPlanePixelStride = env->CallIntMethod(yPlane, getPixelStrideMethodID);
-    jint uPlanePixelStride = env->CallIntMethod(uPlane, getPixelStrideMethodID);
-    jint vPlanePixelStride = env->CallIntMethod(vPlane, getPixelStrideMethodID);
-
-    // Copy the Y data
-    if (yPixelStride == 1 && yRowStride == yPlaneRowStride && yPlanePixelStride == 1) {
-        memcpy(yPlanePtr, yPtr, height * yRowStride);
-    } else {
-        for (int i = 0; i < height; ++i) {
-            uint8_t *src = yPtr + i * yRowStride;
-            uint8_t *dst = yPlanePtr + i * yPlaneRowStride;
-            if (yPixelStride == 1 && yPlanePixelStride == 1) {
-                memcpy(dst, src, width);
-            } else {
-                for (int j = 0; j < width; ++j) {
-                    dst[j * yPlanePixelStride] = src[j * yPixelStride];
-                }
-            }
-        }
-    }
-
-    // Copy the U data
-    if (uPixelStride == 1 && uRowStride == uPlaneRowStride && uPlanePixelStride == 1) {
-        memcpy(uPlanePtr, uPtr, chromaHeight * uRowStride);
-    } else {
-        for (int i = 0; i < chromaHeight; ++i) {
-            uint8_t *src = uPtr + i * uRowStride;
-            uint8_t *dst = uPlanePtr + i * uPlaneRowStride;
-            if (uPixelStride == 1 && uPlanePixelStride == 1) {
-                memcpy(dst, src, width / 2);
-            } else {
-                for (int j = 0; j < width / 2; ++j) {
-                    dst[j * uPlanePixelStride] = src[j * uPixelStride];
-                }
-            }
-        }
-    }
-
-    // Copy the V data
-    if (vPixelStride == 1 && vRowStride == vPlaneRowStride && vPlanePixelStride == 1) {
-        memcpy(vPlanePtr, vPtr, chromaHeight * vRowStride);
-    } else {
-        for (int i = 0; i < chromaHeight; ++i) {
-            uint8_t *src = vPtr + i * vRowStride;
-            uint8_t *dst = vPlanePtr + i * vPlaneRowStride;
-            if (vPixelStride == 1 && vPlanePixelStride == 1) {
-                memcpy(dst, src, width / 2);
-            } else {
-                for (int j = 0; j < width / 2; ++j) {
-                    dst[j * vPlanePixelStride] = src[j * vPixelStride];
-                }
-            }
-        }
-    }
-}*/
-
-
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyYUVBuffer(JNIEnv *env, jobject thiz, jobject image) {
     // Get the Image class and methods to access the planes
     jclass imageClass = env->GetObjectClass(image);
     jmethodID getPlanesMethod = env->GetMethodID(imageClass, "getPlanes", "()[Landroid/media/Image$Plane;");
-    jobjectArray planesArray = (jobjectArray)env->CallObjectMethod(image, getPlanesMethod);
+    jobjectArray planesArray = (jobjectArray) env->CallObjectMethod(image, getPlanesMethod);
 
     // Get the Plane class and methods
     jclass planeClass = env->FindClass("android/media/Image$Plane");
@@ -585,26 +567,26 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyYUVBuffer(JNIEnv *env,
     jobject yPlane = env->GetObjectArrayElement(planesArray, 0);
     jobject yBufferObj = env->CallObjectMethod(yPlane, getBufferMethod);
     jint yRowStride = env->CallIntMethod(yPlane, getRowStrideMethod);
-    jbyte* yBuffer = (jbyte*)env->GetDirectBufferAddress(yBufferObj);
+    jbyte *yBuffer = (jbyte *) env->GetDirectBufferAddress(yBufferObj);
     jint ySize = env->GetDirectBufferCapacity(yBufferObj);
 
     // Get the U plane
     jobject uPlane = env->GetObjectArrayElement(planesArray, 1);
     jobject uBufferObj = env->CallObjectMethod(uPlane, getBufferMethod);
     jint uRowStride = env->CallIntMethod(uPlane, getRowStrideMethod);
-    jbyte* uBuffer = (jbyte*)env->GetDirectBufferAddress(uBufferObj);
+    jbyte *uBuffer = (jbyte *) env->GetDirectBufferAddress(uBufferObj);
     jint uSize = env->GetDirectBufferCapacity(uBufferObj);
 
     // Get the V plane
     jobject vPlane = env->GetObjectArrayElement(planesArray, 2);
     jobject vBufferObj = env->CallObjectMethod(vPlane, getBufferMethod);
     jint vRowStride = env->CallIntMethod(vPlane, getRowStrideMethod);
-    jbyte* vBuffer = (jbyte*)env->GetDirectBufferAddress(vBufferObj);
+    jbyte *vBuffer = (jbyte *) env->GetDirectBufferAddress(vBufferObj);
     jint vSize = env->GetDirectBufferCapacity(vBufferObj);
 
     // Allocate a byte array to hold the YUV data
     jbyteArray yuvData = env->NewByteArray(ySize + uSize + vSize);
-    jbyte* yuvBuffer = env->GetByteArrayElements(yuvData, nullptr);
+    jbyte *yuvBuffer = env->GetByteArrayElements(yuvData, nullptr);
 
     // Copy the Y plane data
     memcpy(yuvBuffer, yBuffer, ySize);
