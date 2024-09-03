@@ -87,8 +87,8 @@ public:
                  const uint8_t *yData, int yRowStride, int yPixelStride,
                  const uint8_t *uData, int uRowStride, int uPixelStride,
                  const uint8_t *vData, int vRowStride, int vPixelStride) {
-        std::unique_lock<std::mutex> lock(mutex);
-        notFull.wait(lock, [this] { return size < capacity; });
+//        std::unique_lock<std::mutex> lock(mutex);
+//        notFull.wait(lock, [this] { return size < capacity; });
 
         rear = (rear + 1) % capacity;
         queue[rear].update(width, height, timestampUs,
@@ -97,11 +97,11 @@ public:
                            vData, vRowStride, vPixelStride);
         size++;
 
-        lock.unlock();
+//        lock.unlock();
         notEmpty.notify_one();
     }
 
-    YUV420 dequeue() {
+    YUV420 dequeueCopy() {
         std::unique_lock<std::mutex> lock(mutex);
         notEmpty.wait(lock, [this] { return size > 0; });
 
@@ -114,13 +114,36 @@ public:
         return item;
     }
 
-    YUV420 peek() {
+    YUV420 peekCopy() {
         std::unique_lock<std::mutex> lock(mutex);
         notEmpty.wait(lock, [this] { return size > 0; });
 
         YUV420 item = queue[front];
 
         lock.unlock();
+        return item;
+    }
+
+    YUV420& dequeue() {
+//        std::unique_lock<std::mutex> lock(mutex);
+//        notEmpty.wait(lock, [this] { return size > 0; });
+
+        YUV420& item = queue[front];
+        front = (front + 1) % capacity;
+        size--;
+
+//        lock.unlock();
+//        notFull.notify_one();
+        return item;
+    }
+
+    YUV420& peek() {
+//        std::unique_lock<std::mutex> lock(mutex);
+//        notEmpty.wait(lock, [this] { return size > 0; });
+
+        YUV420& item = queue[front];
+
+//        lock.unlock();
         return item;
     }
 
@@ -235,15 +258,24 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage2(
         return;
     }
 
+    //  time to fetch references
+    long long startTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
     // Dequeue the next YUV frame from the circular queue
-    YUV420 yuvFrame = yuvQueue.peek();
+    YUV420& yuvFrame = yuvQueue.peek();
     if (removeFromQueue) {
         yuvQueue.dequeue();
     }
 
-    //  time to fetch references
-    /*long long startTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();*/
+    long long dequeueTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    LOGI("Time to dequeue: %lld", dequeueTime - startTime);
+
+
+    long long refStartTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
 
     // Get the Image class and its Plane array
     jclass imageClass = env->GetObjectClass(image);
@@ -296,11 +328,11 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage2(
     int height = yuvFrame.height;
     int chromaHeight = height / 2;
 
-    //  time to fetch references
-    /*long long endTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+
+    long long prepWorkTime = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
-    LOGI("Time to fetch references: %lld", endTime - startTime);*/
+    LOGI("Time to do prep work: %lld", prepWorkTime - refStartTime);
 
     // Define thread functions for copying data
     auto copyYPlane = [&]() {
@@ -368,6 +400,12 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage2(
         }
     };
 
+    //  time to trigger copy
+    long long copyTriggerTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    LOGI("Time to trigger the copy: %lld", copyTriggerTime - refStartTime);
+
     // Create and run threads for copying each plane
     std::vector<std::thread> threads;
     threads.emplace_back(copyYPlane);
@@ -388,6 +426,12 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage2(
 
     // Log to verify successful copying
     LOGI("Successfully copied YUV data to Image object.");
+
+    //  time to complete the copy
+    long long endTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    LOGI("Total Time to do copy: %lld", endTime - startTime);
 
     return;
 }

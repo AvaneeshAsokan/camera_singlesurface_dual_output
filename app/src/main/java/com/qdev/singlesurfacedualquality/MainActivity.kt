@@ -128,6 +128,7 @@ class MainActivity : AppCompatActivity() {
                     vPixelStride = cameraImage.planes[2].pixelStride,
                     timestamp = cameraImage.timestamp
                 )
+                Log.d(TAG, "onImageAvailable: to queue frame time stamp = ${cameraImage.timestamp}")
             }
 
 
@@ -159,9 +160,67 @@ class MainActivity : AppCompatActivity() {
             }*/
             cameraImage.close()
             Log.d(TAG, "onImageAvailable: time taken to add to queue $timeToCreateQueueEntry ms")
+
+            handleHqInputBuffers()
+            handleLqInputBuffers()
+            handleHqCodecOutputBuffer()
+            handleLqCodecOutputBuffer()
+
         } else {
             cameraImage.close()
+
+            if (isHighQualityMuxerStarted) {
+                try {
+                    isHighQualityMuxerStarted = false
+                    hqMuxer?.stop()
+                } catch (e: IllegalStateException) {
+                    e.printStackTrace()
+                } finally {
+                    hqMuxer?.release()
+                    hqMuxer = null
+                }
+            }
+
+            if (isLowQualityMuxerStarted) {
+                try {
+                    isLowQualityMuxerStarted = false
+                    lqMuxer?.stop()
+                } catch (e: IllegalStateException) {
+                    e.printStackTrace()
+                } finally {
+                    lqMuxer?.release()
+                    lqMuxer = null
+                }
+            }
+
+            if (lqCodecStarted) {
+                try {
+                    lqMediaCodec?.stop()
+                } catch (e: IllegalStateException) {
+                    e.printStackTrace()
+                } finally {
+                    lqMediaCodec?.release()
+                    lqMediaCodec = null
+                }
+            }
+
+            if (hqCodecStarted) {
+                try {
+                    mediaCodec?.stop()
+                    Log.d(TAG, "onImageAvailable: stopping high quality codec")
+                } catch (e: IllegalStateException) {
+                    e.printStackTrace()
+                } finally {
+                    mediaCodec?.release()
+                    mediaCodec = null
+                }
+            }
+
+            /*imageReader?.setOnImageAvailableListener(null, null)
+            imageReader?.close()
+            imageReader = null*/
         }
+
 
         /*val planes = cameraImage.planes
         val yBuffer = planes[0].buffer
@@ -386,11 +445,12 @@ class MainActivity : AppCompatActivity() {
                         }
                         Log.d(TAG, "handleHqInputBuffers: time to copy ${timeToCopy} ms")
                         hqDone.set(true)
+                        Log.d(TAG, "handleHqInputBuffers: received frame with timestamp ${it.timestamp}")
                         mediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
                             0,/* size = */
                             it.planes[0].buffer.remaining(),/* presentationTimeUs = */
                             /*cameraImage.timestampUs / 1000*/
-                            it.timestamp / 1000,/* flags = */
+                            it.timestamp ,/* flags = */
                             if (isRecording) {
                                 if (hqFrameCount == 300) {
                                     MediaCodec.BUFFER_FLAG_KEY_FRAME
@@ -430,7 +490,7 @@ class MainActivity : AppCompatActivity() {
                             0,/* size = */
                             it.planes[0].buffer.remaining(),/* presentationTimeUs = */
                             /*cameraImage.timestampUs / 1000*/
-                            it.timestamp / 1000,/* flags = */
+                            it.timestamp ,/* flags = */
                             if (isRecording) {
                                 if (lqFrameCount == 300) {
                                     MediaCodec.BUFFER_FLAG_KEY_FRAME
@@ -489,6 +549,7 @@ class MainActivity : AppCompatActivity() {
                 try {
                     isHighQualityMuxerStarted = false
                     hqMuxer?.stop()
+                    Log.d(TAG, "handleHqCodecOutputBuffer: stopping muxer for segmentation")
                 } catch (e: IllegalStateException) {
                     e.printStackTrace()
                 } finally {
@@ -717,9 +778,9 @@ class MainActivity : AppCompatActivity() {
                         )
 //                        hqCodecStarted = true
 //                        encodeFrames()
-                        processHandler?.post {
+                        /*processHandler?.post {
                             processQueue()
-                        }
+                        }*/
                     } catch (e: CameraAccessException) {
                         e.printStackTrace()
                     }
@@ -749,6 +810,7 @@ class MainActivity : AppCompatActivity() {
         isHighQualityMuxerStarted = false
         try {
             hqMuxer?.stop()
+            Log.d(TAG, "stopRecording: stopping high quality muxer")
         } catch (e: IllegalStateException) {
             e.printStackTrace()
         } finally {
