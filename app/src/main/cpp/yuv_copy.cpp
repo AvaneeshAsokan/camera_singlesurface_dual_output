@@ -7,10 +7,12 @@
 #include <mutex>
 #include <thread>
 #include <condition_variable>
+#include <future>
 
 #include <android/bitmap.h>
 #include <media/NdkImage.h>
 #include <media/NdkImageReader.h>
+#include <arm_neon.h>
 
 
 #define LOG_TAG "YuvUtils"
@@ -124,11 +126,11 @@ public:
         return item;
     }
 
-    YUV420& dequeue() {
+    YUV420 &dequeue() {
 //        std::unique_lock<std::mutex> lock(mutex);
 //        notEmpty.wait(lock, [this] { return size > 0; });
 
-        YUV420& item = queue[front];
+        YUV420 &item = queue[front];
         front = (front + 1) % capacity;
         size--;
 
@@ -137,11 +139,11 @@ public:
         return item;
     }
 
-    YUV420& peek() {
+    YUV420 &peek() {
 //        std::unique_lock<std::mutex> lock(mutex);
 //        notEmpty.wait(lock, [this] { return size > 0; });
 
-        YUV420& item = queue[front];
+        YUV420 &item = queue[front];
 
 //        lock.unlock();
         return item;
@@ -160,7 +162,7 @@ public:
     }
 };
 
-CircularArrayQueue yuvQueue(5, 3840, 2160);
+CircularArrayQueue yuvQueue(5, /*3840, 2160*/ 1920, 1080);
 
 extern "C"
 JNIEXPORT void JNICALL
@@ -168,7 +170,7 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_addToNativeQueue(JNIEnv *e
                                                                        jint y_row_stride, jint u_row_stride, jint v_row_stride, jint y_pixel_stride,
                                                                        jint u_pixel_stride, jint v_pixel_stride, jlong timestamp_us) {
     // TODO: implement addToNativeQueue()
-    yuvQueue.enqueue(3840, 2160, timestamp_us,
+    yuvQueue.enqueue(/*3840, 2160*/ 1920, 1080, timestamp_us,
                      static_cast<const uint8_t *>(env->GetDirectBufferAddress(y_data)), y_row_stride, y_pixel_stride,
                      static_cast<const uint8_t *>(env->GetDirectBufferAddress(u_data)), u_row_stride, u_pixel_stride,
                      static_cast<const uint8_t *>(env->GetDirectBufferAddress(v_data)), v_row_stride, v_pixel_stride);
@@ -263,7 +265,7 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage2(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
     // Dequeue the next YUV frame from the circular queue
-    YUV420& yuvFrame = yuvQueue.peek();
+    YUV420 &yuvFrame = yuvQueue.peek();
     if (removeFromQueue) {
         yuvQueue.dequeue();
     }
@@ -416,7 +418,7 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage2(
     threads.emplace_back(copyVPlane);
 
     // Wait for all threads to finish
-    for (auto &thread : threads) {
+    for (auto &thread: threads) {
         thread.join();
     }
 
@@ -437,6 +439,189 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage2(
     LOGI("Total Time to do copy: %lld", endTime - startTime);
 
     return;
+}
+
+// Helper function to split the plane copy into row ranges and run it on separate threads
+void copyPlaneInParallel(const uint8_t *src, int srcRowStride, int srcPixelStride,
+                         uint8_t *dst, int dstRowStride, int dstPixelStride,
+                         int width, int height) {
+
+    if (srcPixelStride == dstPixelStride && srcRowStride == dstRowStride) {
+        // Direct memcpy when strides are the same
+        memcpy(dst, src, height * srcRowStride);
+    } else {
+        // Slow path: copy pixel by pixel
+        for (int row = 0; row < height; ++row) {
+            for (int col = 0; col < width; ++col) {
+                uint8_t *srcPixel = const_cast<uint8_t *>(&src[row * srcRowStride + col * srcPixelStride]);
+                uint8_t *dstPixel = &dst[row * dstRowStride + col * dstPixelStride];
+                *dstPixel = *srcPixel;
+            }
+        }
+    }
+}
+
+void copyPlane(const uint8_t *src, uint8_t *dst, int width, int height, int srcRowStride, int dstRowStride, int srcPixelStride, int dstPixelStride) {
+    for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+            dst[row * dstRowStride + col * dstPixelStride] = src[row * srcRowStride + col * srcPixelStride];
+        }
+    }
+}
+
+void neonCopyPlane(uint8_t *src, uint8_t *dst, int width, int height, int srcRowStride, int dstRowStride) {
+    for (int row = 0; row < height; ++row) {
+        uint8_t *srcRow = src + row * srcRowStride;
+        uint8_t *dstRow = dst + row * dstRowStride;
+
+        for (int col = 0; col < width; col += 16) {
+            // Load 16 bytes from src
+            uint8x16_t data = vld1q_u8(srcRow + col);
+            // Store 16 bytes to dst
+            vst1q_u8(dstRow + col, data);
+        }
+    }
+}
+
+void multiThreadedCopyYUV420(const uint8_t *ySrc, const uint8_t *uSrc, const uint8_t *vSrc,
+                             uint8_t *yDst, uint8_t *uDst, uint8_t *vDst,
+                             int width, int height, int ySrcRowStride, int yDstRowStride,
+                             int uSrcRowStride, int uDstRowStride, int vSrcRowStride, int vDstRowStride,
+                             int numThreads) {
+    std::vector<std::thread> threads;
+
+    // Process Y plane in multiple threads
+    int yHeight = height;
+    int rowsPerThread = yHeight / numThreads;
+    int extraRows = yHeight % numThreads;
+    int startRow = 0;
+
+    for (int i = 0; i < numThreads; ++i) {
+        int rowsToCopy = rowsPerThread + (i < extraRows ? 1 : 0);
+        threads.emplace_back([=]() {
+            copyPlane(ySrc + startRow * ySrcRowStride, yDst + startRow * yDstRowStride,
+                      width, rowsToCopy, ySrcRowStride, yDstRowStride, 1, 1);
+        });
+        startRow += rowsToCopy;
+    }
+
+    // Wait for Y plane threads
+    for (auto &thread: threads) {
+        thread.join();
+    }
+
+    // Process U and V planes (subsampled)
+    threads.clear();
+    int uvWidth = width / 2;
+    int uvHeight = height / 2;
+
+    rowsPerThread = uvHeight / numThreads;
+    extraRows = uvHeight % numThreads;
+    startRow = 0;
+
+    for (int i = 0; i < numThreads; ++i) {
+        int rowsToCopy = rowsPerThread + (i < extraRows ? 1 : 0);
+        threads.emplace_back([=]() {
+            copyPlane(uSrc + startRow * uSrcRowStride, uDst + startRow * uDstRowStride,
+                      uvWidth, rowsToCopy, uSrcRowStride, uDstRowStride, 1, 1);
+            copyPlane(vSrc + startRow * vSrcRowStride, vDst + startRow * vDstRowStride,
+                      uvWidth, rowsToCopy, vSrcRowStride, vDstRowStride, 1, 1);
+        });
+        startRow += rowsToCopy;
+    }
+
+    // Wait for U/V plane threads
+    for (auto &thread: threads) {
+        thread.join();
+    }
+}
+
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImageV2(
+        JNIEnv *env,
+        jobject /* this */,
+        jobject image,  // The Image object from Kotlin
+        jboolean removeFromQueue) {
+    // Step 1: Initialize the Android Image object
+    jclass imageClass = env->GetObjectClass(image);
+    jmethodID getPlanesMethod = env->GetMethodID(imageClass, "getPlanes", "()[Landroid/media/Image$Plane;");
+    jobjectArray planes = (jobjectArray) env->CallObjectMethod(image, getPlanesMethod);
+    int numPlanes = env->GetArrayLength(planes);
+
+    if (numPlanes != 3) {
+        // Ensure the Image object has three planes (YUV 420 format)
+        return;
+    }
+
+    // Step 2: Dequeue or Peek frame from CircularArrayQueue
+    YUV420 &frame = removeFromQueue ? yuvQueue.dequeue() : yuvQueue.peek();
+
+    // Step 3: Copy YUV data from frame to Image object
+    for (int i = 0; i < numPlanes; i++) {
+        jobject planeObj = env->GetObjectArrayElement(planes, i);
+        jclass planeClass = env->GetObjectClass(planeObj);
+
+        // Get the ByteBuffer for each plane
+        jmethodID getBufferMethod = env->GetMethodID(planeClass, "getBuffer", "()Ljava/nio/ByteBuffer;");
+        jobject bufferObj = env->CallObjectMethod(planeObj, getBufferMethod);
+        uint8_t *destBuffer = (uint8_t *) env->GetDirectBufferAddress(bufferObj);
+
+        // Get the pixel and row strides for each plane
+        jmethodID getRowStrideMethod = env->GetMethodID(planeClass, "getRowStride", "()I");
+        jint destRowStride = env->CallIntMethod(planeObj, getRowStrideMethod);
+
+        jmethodID getPixelStrideMethod = env->GetMethodID(planeClass, "getPixelStride", "()I");
+        jint destPixelStride = env->CallIntMethod(planeObj, getPixelStrideMethod);
+
+        // Source YUVImagePlane data
+        YUVImagePlane &srcPlane = frame.planes[i];
+        int srcRowStride = srcPlane.rowStride;
+        int srcPixelStride = srcPlane.pixelStride;
+        uint8_t *srcBuffer = srcPlane.byteBuffer.data();
+
+        // Step 4: Copy the data using NEON intrinsics
+        int height = (i == 0) ? frame.height : frame.height / 2;
+        int width = (i == 0) ? frame.width : frame.width / 2;
+
+        for (int y = 0; y < height; ++y) {
+            uint8_t *srcRow = srcBuffer + y * srcRowStride;
+            uint8_t *destRow = destBuffer + y * destRowStride;
+
+            // Check alignment
+            if ((((uintptr_t) srcRow % 16) == 0) && (((uintptr_t) destRow % 16) == 0) &&
+                srcPixelStride == destPixelStride && srcPixelStride > 1) {
+                // Strides are equal but greater than 1 and both source and destination are aligned
+                int stride = srcPixelStride;
+                int x = 0;
+
+                // Use NEON to process pixels in chunks of 16 bytes
+                for (; x <= (width - 16); x += 16) {
+                    // Load pixels using stride
+                    uint8x16x2_t srcData = vld2q_u8(srcRow + x * stride);
+
+                    // Store pixels using stride
+                    vst2q_u8(destRow + x * stride, srcData);
+                }
+
+                // Handle any remaining pixels after processing in chunks of 16
+                for (; x < width; ++x) {
+                    uint8_t pixelValue = *(srcRow + x * stride);
+                    *(destRow + x * stride) = pixelValue;
+                }
+            } else if (srcPixelStride == 1 && destPixelStride == 1) {
+                // Both strides are 1, use memcpy for the entire row
+                memcpy(destRow, srcRow, width);
+            } else {
+                // Fallback to manual copy if pixel strides are different or alignment is incorrect
+                for (int x = 0; x < width; ++x) {
+                    uint8_t pixelValue = *(srcRow + x * srcPixelStride);
+                    *(destRow + x * destPixelStride) = pixelValue;
+                }
+            }
+        }
+    }
 }
 
 

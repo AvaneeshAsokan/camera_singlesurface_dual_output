@@ -28,6 +28,8 @@ object YuvUtils {
 
     external fun copyToImage2(image: Image, removeFromQueue: Boolean)
 
+    external fun copyToImageV2(image: Image, removeFromQueue: Boolean)
+
     external fun copyYUVBuffer(image: Image): ByteArray //  hits buffer overflow
 
     external fun copyToImage(yuv420: YUV420, image: Image)

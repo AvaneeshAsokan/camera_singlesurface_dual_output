@@ -107,12 +107,15 @@ class MainActivity : AppCompatActivity() {
 
     private val imageListener = ImageReader.OnImageAvailableListener { reader ->
         val cameraImage = reader.acquireLatestImage() ?: return@OnImageAvailableListener
-//        Log.d(TAG, "onImageAvailable: plane 0: Buffer size = ${cameraImage.planes[0].buffer.remaining()}, " +
-//                "plane 1: Buffer size = ${cameraImage.planes[1].buffer.remaining()}, \n" +
-//                "plane 2: Buffer size = ${cameraImage.planes[2].buffer.remaining()} \n" +
-//                "width * height = ${cameraImage.width * cameraImage.height} \n" +
-//                "width * height / 4 = ${(cameraImage.width / 2) * (cameraImage.height / 2)}")
-
+        /*Log.d(TAG, "onImageAvailable: plane 0: Buffer size = ${cameraImage.planes[0].buffer.remaining()}, " +
+                "plane 1: Buffer size = ${cameraImage.planes[1].buffer.remaining()}, \n" +
+                "plane 2: Buffer size = ${cameraImage.planes[2].buffer.remaining()} \n" +
+                "width * height = ${cameraImage.width * cameraImage.height} \n" +
+                "width * height / 4 = ${(cameraImage.width / 2) * (cameraImage.height / 2)}")*/
+        Log.d(TAG, "onImageAvailable: " +
+                "\nwidth x height = ${cameraImage.width} x ${cameraImage.height}" +
+                "\npixel strides = ${cameraImage.planes[0].pixelStride}, ${cameraImage.planes[1].pixelStride}, ${cameraImage.planes[2].pixelStride}" +
+                "\nrow strides = ${cameraImage.planes[0].rowStride}, ${cameraImage.planes[1].rowStride}, ${cameraImage.planes[2].rowStride}")
         if (isRecording) {
             //  enqueue the image to the NDK queue
             val timeToCreateQueueEntry = measureTimeMillis {
@@ -442,7 +445,7 @@ class MainActivity : AppCompatActivity() {
 //                        YuvUtils.copyYUV(cameraImage, it)
                         val timeToCopy = measureTimeMillis {
 //                                YuvUtils.copyToImage(cameraImage, it)
-                            YuvUtils.copyToImage2(it, false)
+                            YuvUtils.copyToImageV2(it, false)
                         }
                         Log.d(TAG, "handleHqInputBuffers: time to copy ${timeToCopy} ms")
                         hqDone.set(true)
@@ -482,7 +485,7 @@ class MainActivity : AppCompatActivity() {
 //                        YuvUtils.copyYUV(cameraImage, it)
                         val timeToCopy = measureTimeMillis {
 //                            YuvUtils.copyToImage(cameraImage, it)
-                            YuvUtils.copyToImage2(it, true)
+                            YuvUtils.copyToImageV2(it, true)
                         }
                         Log.d(TAG, "handleLqInputBuffers: time to copy ${timeToCopy} ms")
                         lqDone.set(true)
@@ -863,7 +866,7 @@ class MainActivity : AppCompatActivity() {
         try {
             mediaCodec = MediaCodec.createEncoderByType("video/avc")
 
-            val format = MediaFormat.createVideoFormat("video/avc", 3840, 2160)
+            val format = MediaFormat.createVideoFormat("video/avc", /*3840, 2160*/ 1920, 1080)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 6 * 1000 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
@@ -878,7 +881,7 @@ class MainActivity : AppCompatActivity() {
         try {
             lqMediaCodec = MediaCodec.createEncoderByType("video/avc")
 
-            val format = MediaFormat.createVideoFormat("video/avc", 3840, 2160)
+            val format = MediaFormat.createVideoFormat("video/avc", /*3840, 2160*/ 1920, 1080)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 500 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
@@ -892,7 +895,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         imageReader?.close()
-        imageReader = ImageReader.newInstance(3840, 2160, android.graphics.ImageFormat.YUV_420_888, 2)
+        imageReader = ImageReader.newInstance(/*3840, 2160*/ 1920, 1080, android.graphics.ImageFormat.YUV_420_888, 2)
         imageReader?.setOnImageAvailableListener(imageListener, backgroundHandler)
     }
 
