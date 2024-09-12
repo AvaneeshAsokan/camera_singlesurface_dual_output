@@ -28,6 +28,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.text.InputType
 import android.util.Log
+import android.util.Size
 import android.view.Surface
 import android.view.TextureView
 import androidx.activity.enableEdgeToEdge
@@ -78,6 +79,7 @@ class MainActivity : AppCompatActivity() {
     private var previewSession: CameraCaptureSession? = null
     private var captureSession: CameraCaptureSession? = null
     private var isRecording: Boolean = false
+    private var selectedResolution: Int = -1
 
     private var mediaCodec: MediaCodec? = null
     private var lqMediaCodec: MediaCodec? = null
@@ -110,6 +112,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var queue: CircularArrayQueue
 
+    private val supportedResolutions by lazy(::getSupportedResolutionsList)
+
     private val imageListener = ImageReader.OnImageAvailableListener { reader ->
         val cameraImage = reader.acquireLatestImage() ?: return@OnImageAvailableListener
         /*Log.d(TAG, "onImageAvailable: plane 0: Buffer size = ${cameraImage.planes[0].buffer.remaining()}, " +
@@ -134,7 +138,9 @@ class MainActivity : AppCompatActivity() {
                     yPixelStride = cameraImage.planes[0].pixelStride,
                     uPixelStride = cameraImage.planes[1].pixelStride,
                     vPixelStride = cameraImage.planes[2].pixelStride,
-                    timestamp = cameraImage.timestamp
+                    timestamp = cameraImage.timestamp,
+                    width = cameraImage.width,
+                    height = cameraImage.height
                 )
                 Log.d(TAG, "onImageAvailable: to queue frame time stamp = ${cameraImage.timestamp}")
             }
@@ -852,6 +858,8 @@ class MainActivity : AppCompatActivity() {
             abortCaptures()
             close()
         }
+
+        YuvUtils.cleanupQueue()
     }
 
     private fun setupSingleSurface() {
@@ -874,10 +882,18 @@ class MainActivity : AppCompatActivity() {
             processHandler = Handler(processThread!!.looper)
         }
 
+        val chosenSize = if (selectedResolution != -1) {
+            Size(supportedResolutions[selectedResolution].videoFrameWidth, supportedResolutions[selectedResolution].videoFrameHeight)
+        } else {
+            Size(1920, 1080)
+        }
+
+        YuvUtils.setupQueue(5, chosenSize.width, chosenSize.height)
+
         try {
             mediaCodec = MediaCodec.createEncoderByType("video/avc")
 
-            val format = MediaFormat.createVideoFormat("video/avc", 3840, 2160 /*1920, 1080*/)
+            val format = MediaFormat.createVideoFormat("video/avc", chosenSize.width, chosenSize.height/*1920, 1080*/)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 6 * 1000 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
@@ -892,7 +908,7 @@ class MainActivity : AppCompatActivity() {
         try {
             lqMediaCodec = MediaCodec.createEncoderByType("video/avc")
 
-            val format = MediaFormat.createVideoFormat("video/avc", 3840, 2160 /*1920, 1080*/)
+            val format = MediaFormat.createVideoFormat("video/avc", chosenSize.width, chosenSize.height/*1920, 1080*/)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 500 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
@@ -906,7 +922,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         imageReader?.close()
-        imageReader = ImageReader.newInstance(3840, 2160 /*1920, 1080*/, android.graphics.ImageFormat.YUV_420_888, 2)
+        imageReader = ImageReader.newInstance(chosenSize.width, chosenSize.height/*1920, 1080*/, android.graphics.ImageFormat.YUV_420_888, 2)
         imageReader?.setOnImageAvailableListener(imageListener, backgroundHandler)
     }
 
@@ -1231,7 +1247,7 @@ class MainActivity : AppCompatActivity() {
         binding.videoResolutions.apply {
             inputType = InputType.TYPE_NULL
             setText("Resolutions", false)
-            val resolutionsList = getSupportedResolutionsList() ?: ArrayList()
+            val resolutionsList = supportedResolutions
 
             val resolutionsSpinnerAdapter = ResolutionsSpinnerAdapter(this@MainActivity, resolutionsList)
             setDropDownBackgroundDrawable(ResourcesCompat.getDrawable(resources, R.drawable.resolution_spinner_background, null))
@@ -1242,9 +1258,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setSelectedResolutionText(position: Int) {
-        if (getSupportedResolutionsList().isEmpty()) return
+        if (supportedResolutions.isEmpty()) return
 
-        with(getSupportedResolutionsList()[position]) {
+        selectedResolution = position
+        with(supportedResolutions[position]) {
             binding.videoResolutions.setText(getResTextFromSelection(), false)
         }
     }

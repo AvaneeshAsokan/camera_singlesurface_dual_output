@@ -14,11 +14,9 @@
 #include <media/NdkImageReader.h>
 #include <arm_neon.h>
 
-
 #define LOG_TAG "YuvUtils"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-
 
 std::mutex copyMutex;
 
@@ -162,27 +160,47 @@ public:
     }
 };
 
-CircularArrayQueue yuvQueue(5, 3840, 2160 /*1920, 1080*/);
+CircularArrayQueue *yuvQueue = nullptr;
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_addToNativeQueue(JNIEnv *env, jobject thiz, jobject y_data, jobject u_data, jobject v_data,
-                                                                       jint y_row_stride, jint u_row_stride, jint v_row_stride, jint y_pixel_stride,
-                                                                       jint u_pixel_stride, jint v_pixel_stride, jlong timestamp_us) {
-    // TODO: implement addToNativeQueue()
-    yuvQueue.enqueue(3840, 2160 /*1920, 1080*/, timestamp_us,
-                     static_cast<const uint8_t *>(env->GetDirectBufferAddress(y_data)), y_row_stride, y_pixel_stride,
-                     static_cast<const uint8_t *>(env->GetDirectBufferAddress(u_data)), u_row_stride, u_pixel_stride,
-                     static_cast<const uint8_t *>(env->GetDirectBufferAddress(v_data)), v_row_stride, v_pixel_stride);
+Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_setupQueue(JNIEnv *env, jobject thiz, jint capacity, jint width, jint height) {
+    if (yuvQueue == nullptr) {
+        yuvQueue = new CircularArrayQueue(capacity, width, height);
+    }
+}
 
-    LOGI("Native YUV queue size: %d", yuvQueue.getSize());
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_cleanupQueue(JNIEnv *env, jobject thiz) {
+    if (yuvQueue != nullptr) {
+        delete yuvQueue;
+        yuvQueue = nullptr;
+    }
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_addToNativeQueue(
+        JNIEnv *env, jobject thiz,
+        jobject y_data, jobject u_data, jobject v_data,
+        jint y_row_stride, jint u_row_stride, jint v_row_stride,
+        jint y_pixel_stride, jint u_pixel_stride, jint v_pixel_stride,
+        jlong timestamp_us, jint width, jint height) {
+
+    yuvQueue->enqueue(width,height, timestamp_us,
+                      static_cast<const uint8_t *>(env->GetDirectBufferAddress(y_data)), y_row_stride, y_pixel_stride,
+                      static_cast<const uint8_t *>(env->GetDirectBufferAddress(u_data)), u_row_stride, u_pixel_stride,
+                      static_cast<const uint8_t *>(env->GetDirectBufferAddress(v_data)), v_row_stride, v_pixel_stride);
+
+    LOGI("Native YUV queue size: %d", yuvQueue->getSize());
 }
 
 //function to return if the queue is empty
 extern "C"
 JNIEXPORT jboolean JNICALL
 Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_isQueueEmpty(JNIEnv *env, jobject thiz) {
-    return yuvQueue.isEmpty();
+    return yuvQueue->isEmpty();
 }
 
 JavaVM *gJvm = nullptr; // Store the JavaVM reference
@@ -255,7 +273,7 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage2(
         jboolean removeFromQueue) {
 
     // Check if the queue is empty
-    if (yuvQueue.isEmpty()) {
+    if (yuvQueue->isEmpty()) {
         LOGI("Queue is empty.");
         return;
     }
@@ -265,9 +283,9 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImage2(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
     // Dequeue the next YUV frame from the circular queue
-    YUV420 &yuvFrame = yuvQueue.peek();
+    YUV420 &yuvFrame = yuvQueue->peek();
     if (removeFromQueue) {
-        yuvQueue.dequeue();
+        yuvQueue->dequeue();
     }
 
     long long dequeueTime = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -556,7 +574,7 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImageV2(
     }
 
     // Step 2: Dequeue or Peek frame from CircularArrayQueue
-    YUV420 &frame = removeFromQueue ? yuvQueue.dequeue() : yuvQueue.peek();
+    YUV420 &frame = removeFromQueue ? yuvQueue->dequeue() : yuvQueue->peek();
 
     // Step 3: Copy YUV data from frame to Image object
     for (int i = 0; i < numPlanes; i++) {
@@ -643,7 +661,7 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImageV3(
     }
 
     // Step 2: Dequeue or Peek frame from CircularArrayQueue
-    YUV420 &frame = removeFromQueue ? yuvQueue.dequeue() : yuvQueue.peek();
+    YUV420 &frame = removeFromQueue ? yuvQueue->dequeue() : yuvQueue->peek();
 
     // Step 3: Copy YUV data from frame to Image object
     for (int i = 0; i < numPlanes; i++) {
@@ -693,7 +711,7 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImageV3(
                 return;
             }
 
-            if ((((uintptr_t)srcRow % 16) == 0) && (((uintptr_t)destRow % 16) == 0) &&
+            if ((((uintptr_t) srcRow % 16) == 0) && (((uintptr_t) destRow % 16) == 0) &&
                 srcPixelStride == destPixelStride && srcPixelStride > 1) {
                 // Strides are equal but greater than 1 and both source and destination are aligned
                 int stride = srcPixelStride;

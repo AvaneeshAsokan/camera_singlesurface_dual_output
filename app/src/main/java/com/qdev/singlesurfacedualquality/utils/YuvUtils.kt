@@ -9,6 +9,10 @@ object YuvUtils {
         System.loadLibrary("yuv_copy")
     }
 
+    external fun setupQueue(capacity: Int, width: Int, height: Int)
+
+    external fun cleanupQueue()
+
     external fun copyYUV(srcImage: Image, destImage: Image)
 //    external fun copyYUV2(srcImage: Image, destImage: Image)
     external fun addToNativeQueue(yData: ByteBuffer,
@@ -20,7 +24,9 @@ object YuvUtils {
                                   yPixelStride: Int,
                                   uPixelStride: Int,
                                   vPixelStride: Int,
-                                  timestamp: Long)
+                                  timestamp: Long,
+                                  width: Int,
+                                  height: Int)
 
     external fun isQueueEmpty(): Boolean
 
