@@ -12,7 +12,7 @@
         android:layout_width="0dp"
         android:layout_height="0dp"
         app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintDimensionRatio="9:16"
+        app:layout_constraintDimensionRatio="16:9"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
@@ -23,8 +23,8 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginStart="10dp"
-        android:layout_marginEnd="40dp"
         android:layout_marginTop="10dp"
+        android:layout_marginEnd="40dp"
         android:background="@color/gray"
         android:paddingLeft="10dp"
         android:paddingTop="5sp"
@@ -39,7 +39,7 @@
     <com.google.android.material.textfield.TextInputLayout
         android:id="@+id/video_resolution_label"
         style="@style/Widget.App.ResolutionSpinner"
-        android:layout_width="100dp"
+        android:layout_width="wrap_content"
         android:layout_height="0dp"
         android:layout_marginStart="5dp"
         android:gravity="center_vertical"
@@ -58,8 +58,8 @@
             android:layout_height="wrap_content"
             android:background="@null"
             android:backgroundTint="@android:color/transparent"
-            android:dropDownWidth="80dp"
-            android:dropDownSelector="@color/black"
+            android:dropDownWidth="150dp"
+            android:dropDownSelector="@color/dark_gray"
             android:gravity="center_vertical"
             android:inputType="none"
             android:maxLines="1"
@@ -77,10 +77,10 @@
         android:id="@+id/btnCapture"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="40dp"
+        android:layout_marginEnd="20dp"
         android:text="Capture"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent" />
+        app:layout_constraintTop_toTopOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

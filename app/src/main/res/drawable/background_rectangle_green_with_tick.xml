@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="2dp"/>
+            <stroke android:width="1sp"
+                android:color="@color/ai_bright_green"/>
+            <solid android:color="@color/ai_bright_green" />
+        </shape>
+    </item>
+   <!-- <item
+        android:top="18dp"
+        android:left="28dp"
+        android:bottom="18dp"
+        android:right="28dp"
+        android:drawable="@drawable/ic_done_green_tick" />-->
+
+</layer-list>

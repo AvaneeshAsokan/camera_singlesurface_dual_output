@@ -6,4 +6,11 @@
     </style>
 
     <style name="Theme.SingleSurfaceDualQuality" parent="Base.Theme.SingleSurfaceDualQuality" />
+
+
+    <style name="Widget.App.ResolutionSpinner" parent="@style/Widget.MaterialComponents.TextInputLayout.FilledBox.ExposedDropdownMenu">
+        <item name="overlapAnchor">true</item>
+        <item name="android:layout_marginBottom">0dp</item>
+        <item name="endIconDrawable">@null</item>
+    </style>
 </resources>

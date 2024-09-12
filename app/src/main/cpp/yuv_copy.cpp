@@ -162,7 +162,7 @@ public:
     }
 };
 
-CircularArrayQueue yuvQueue(5, /*3840, 2160*/ 1920, 1080);
+CircularArrayQueue yuvQueue(5, 3840, 2160 /*1920, 1080*/);
 
 extern "C"
 JNIEXPORT void JNICALL
@@ -170,7 +170,7 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_addToNativeQueue(JNIEnv *e
                                                                        jint y_row_stride, jint u_row_stride, jint v_row_stride, jint y_pixel_stride,
                                                                        jint u_pixel_stride, jint v_pixel_stride, jlong timestamp_us) {
     // TODO: implement addToNativeQueue()
-    yuvQueue.enqueue(/*3840, 2160*/ 1920, 1080, timestamp_us,
+    yuvQueue.enqueue(3840, 2160 /*1920, 1080*/, timestamp_us,
                      static_cast<const uint8_t *>(env->GetDirectBufferAddress(y_data)), y_row_stride, y_pixel_stride,
                      static_cast<const uint8_t *>(env->GetDirectBufferAddress(u_data)), u_row_stride, u_pixel_stride,
                      static_cast<const uint8_t *>(env->GetDirectBufferAddress(v_data)), v_row_stride, v_pixel_stride);
@@ -613,6 +613,110 @@ Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImageV2(
             } else if (srcPixelStride == 1 && destPixelStride == 1) {
                 // Both strides are 1, use memcpy for the entire row
                 memcpy(destRow, srcRow, width);
+            } else {
+                // Fallback to manual copy if pixel strides are different or alignment is incorrect
+                for (int x = 0; x < width; ++x) {
+                    uint8_t pixelValue = *(srcRow + x * srcPixelStride);
+                    *(destRow + x * destPixelStride) = pixelValue;
+                }
+            }
+        }
+    }
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_copyToImageV3(
+        JNIEnv *env,
+        jobject /* this */,
+        jobject image,  // The Image object from Kotlin
+        jboolean removeFromQueue) {
+    // Step 1: Initialize the Android Image object
+    jclass imageClass = env->GetObjectClass(image);
+    jmethodID getPlanesMethod = env->GetMethodID(imageClass, "getPlanes", "()[Landroid/media/Image$Plane;");
+    jobjectArray planes = (jobjectArray) env->CallObjectMethod(image, getPlanesMethod);
+    int numPlanes = env->GetArrayLength(planes);
+
+    if (numPlanes != 3) {
+        // Ensure the Image object has three planes (YUV 420 format)
+        return;
+    }
+
+    // Step 2: Dequeue or Peek frame from CircularArrayQueue
+    YUV420 &frame = removeFromQueue ? yuvQueue.dequeue() : yuvQueue.peek();
+
+    // Step 3: Copy YUV data from frame to Image object
+    for (int i = 0; i < numPlanes; i++) {
+        jobject planeObj = env->GetObjectArrayElement(planes, i);
+        jclass planeClass = env->GetObjectClass(planeObj);
+
+        // Get the ByteBuffer for each plane
+        jmethodID getBufferMethod = env->GetMethodID(planeClass, "getBuffer", "()Ljava/nio/ByteBuffer;");
+        jobject bufferObj = env->CallObjectMethod(planeObj, getBufferMethod);
+        uint8_t *destBuffer = (uint8_t *) env->GetDirectBufferAddress(bufferObj);
+
+        if (destBuffer == nullptr) {
+            // Direct buffer address is not valid; return or handle the error
+            return;
+        }
+
+        // Get the pixel and row strides for each plane
+        jmethodID getRowStrideMethod = env->GetMethodID(planeClass, "getRowStride", "()I");
+        jint destRowStride = env->CallIntMethod(planeObj, getRowStrideMethod);
+
+        jmethodID getPixelStrideMethod = env->GetMethodID(planeClass, "getPixelStride", "()I");
+        jint destPixelStride = env->CallIntMethod(planeObj, getPixelStrideMethod);
+
+        // Source YUVImagePlane data
+        YUVImagePlane &srcPlane = frame.planes[i];
+        int srcRowStride = srcPlane.rowStride;
+        int srcPixelStride = srcPlane.pixelStride;
+        uint8_t *srcBuffer = srcPlane.byteBuffer.data();
+
+        if (srcBuffer == nullptr) {
+            // Source buffer is not valid; return or handle the error
+            return;
+        }
+
+        // Step 4: Copy the data using NEON intrinsics
+        int height = (i == 0) ? frame.height : frame.height / 2;
+        int width = (i == 0) ? frame.width : frame.width / 2;
+
+        for (int y = 0; y < height; ++y) {
+            uint8_t *srcRow = srcBuffer + y * srcRowStride;
+            uint8_t *destRow = destBuffer + y * destRowStride;
+
+            // Ensure not to exceed the buffer boundary
+            if ((srcRow >= srcBuffer + (height * srcRowStride)) ||
+                (destRow >= destBuffer + (height * destRowStride))) {
+                // Avoid accessing memory beyond allocated buffers
+                return;
+            }
+
+            if ((((uintptr_t)srcRow % 16) == 0) && (((uintptr_t)destRow % 16) == 0) &&
+                srcPixelStride == destPixelStride && srcPixelStride > 1) {
+                // Strides are equal but greater than 1 and both source and destination are aligned
+                int stride = srcPixelStride;
+                int x = 0;
+
+                // Use NEON to process pixels in chunks of 16 bytes
+                for (; x <= (width - 16); x += 16) {
+                    // Load pixels using stride
+                    uint8x16x2_t srcData = vld2q_u8(srcRow + x * stride);
+                    // Store pixels using stride
+                    vst2q_u8(destRow + x * stride, srcData);
+                }
+
+                // Handle any remaining pixels after processing in chunks of 16
+                for (; x < width; ++x) {
+                    uint8_t pixelValue = *(srcRow + x * stride);
+                    *(destRow + x * stride) = pixelValue;
+                }
+            } else if (srcPixelStride == 1 && destPixelStride == 1) {
+                // Both strides are 1, use memcpy for the entire row
+                // Ensure that memcpy does not copy more than available space
+                int copySize = std::min(width, destRowStride);
+                memcpy(destRow, srcRow, copySize);
             } else {
                 // Fallback to manual copy if pixel strides are different or alignment is incorrect
                 for (int x = 0; x < width; ++x) {

@@ -15,15 +15,18 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.media.CamcorderProfile
 import android.media.Image
 import android.media.ImageReader
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.text.InputType
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
@@ -31,6 +34,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.res.ResourcesCompat
 import androidx.core.performance.play.services.PlayServicesDevicePerformance
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -39,6 +43,7 @@ import com.qdev.singlesurfacedualquality.utils.CircularArrayQueue
 import com.qdev.singlesurfacedualquality.utils.InputSurface
 import com.qdev.singlesurfacedualquality.utils.OutputSurface
 import com.qdev.singlesurfacedualquality.utils.YuvUtils
+import com.qdev.singlesurfacedualquality.views.ResolutionsSpinnerAdapter
 import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -133,6 +138,8 @@ class MainActivity : AppCompatActivity() {
                 )
                 Log.d(TAG, "onImageAvailable: to queue frame time stamp = ${cameraImage.timestamp}")
             }
+
+            Log.d(TAG, "onImageAvailable: colour format = ${cameraImage.format}")
 
             val timestamp = cameraImage.timestamp
 
@@ -443,9 +450,13 @@ class MainActivity : AppCompatActivity() {
                     val inputImage = mediaCodec?.getInputImage(index)
                     inputImage?.let {
 //                        YuvUtils.copyYUV(cameraImage, it)
+                        Log.d(TAG, "handleHqInputBuffers: colour format = ${it.format}")
+                        Log.d(TAG, "handleHqInputBuffers: plane 0, pixel stride = ${it.planes[0].pixelStride}, row stride = ${it.planes[0].rowStride}")
+                        Log.d(TAG, "handleHqInputBuffers: plane 1, pixel stride = ${it.planes[1].pixelStride}, row stride = ${it.planes[1].rowStride}")
+                        Log.d(TAG, "handleHqInputBuffers: plane 2, pixel stride = ${it.planes[2].pixelStride}, row stride = ${it.planes[2].rowStride}")
                         val timeToCopy = measureTimeMillis {
 //                                YuvUtils.copyToImage(cameraImage, it)
-                            YuvUtils.copyToImageV2(it, false)
+                            YuvUtils.copyToImageV3(it, false)
                         }
                         Log.d(TAG, "handleHqInputBuffers: time to copy ${timeToCopy} ms")
                         hqDone.set(true)
@@ -485,7 +496,7 @@ class MainActivity : AppCompatActivity() {
 //                        YuvUtils.copyYUV(cameraImage, it)
                         val timeToCopy = measureTimeMillis {
 //                            YuvUtils.copyToImage(cameraImage, it)
-                            YuvUtils.copyToImageV2(it, true)
+                            YuvUtils.copyToImageV3(it, true)
                         }
                         Log.d(TAG, "handleLqInputBuffers: time to copy ${timeToCopy} ms")
                         lqDone.set(true)
@@ -866,7 +877,7 @@ class MainActivity : AppCompatActivity() {
         try {
             mediaCodec = MediaCodec.createEncoderByType("video/avc")
 
-            val format = MediaFormat.createVideoFormat("video/avc", /*3840, 2160*/ 1920, 1080)
+            val format = MediaFormat.createVideoFormat("video/avc", 3840, 2160 /*1920, 1080*/)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 6 * 1000 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
@@ -881,7 +892,7 @@ class MainActivity : AppCompatActivity() {
         try {
             lqMediaCodec = MediaCodec.createEncoderByType("video/avc")
 
-            val format = MediaFormat.createVideoFormat("video/avc", /*3840, 2160*/ 1920, 1080)
+            val format = MediaFormat.createVideoFormat("video/avc", 3840, 2160 /*1920, 1080*/)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 500 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
@@ -895,7 +906,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         imageReader?.close()
-        imageReader = ImageReader.newInstance(/*3840, 2160*/ 1920, 1080, android.graphics.ImageFormat.YUV_420_888, 2)
+        imageReader = ImageReader.newInstance(3840, 2160 /*1920, 1080*/, android.graphics.ImageFormat.YUV_420_888, 2)
         imageReader?.setOnImageAvailableListener(imageListener, backgroundHandler)
     }
 
@@ -1144,6 +1155,9 @@ class MainActivity : AppCompatActivity() {
                     startPreview()
                 }
             }
+            videoResolutions.setOnItemClickListener { _, _, position, _ ->
+                setSelectedResolutionText(position)
+            }
         }
     }
 
@@ -1176,6 +1190,8 @@ class MainActivity : AppCompatActivity() {
         binding.texture.post {
             configureTransform(width, height)
             manager.openCamera(cameraId, cameraStateCallback, backgroundHandler)
+
+            setupRecorderResolutionsList()
         }
     }
 
@@ -1211,6 +1227,28 @@ class MainActivity : AppCompatActivity() {
         binding.texture.setTransform(matrix)
     }
 
+    private fun setupRecorderResolutionsList() {
+        binding.videoResolutions.apply {
+            inputType = InputType.TYPE_NULL
+            setText("Resolutions", false)
+            val resolutionsList = getSupportedResolutionsList() ?: ArrayList()
+
+            val resolutionsSpinnerAdapter = ResolutionsSpinnerAdapter(this@MainActivity, resolutionsList)
+            setDropDownBackgroundDrawable(ResourcesCompat.getDrawable(resources, R.drawable.resolution_spinner_background, null))
+            setAdapter(resolutionsSpinnerAdapter)
+            resolutionsSpinnerAdapter.setNotifyOnChange(true)
+            resolutionsSpinnerAdapter.notifyDataSetChanged()
+        }
+    }
+
+    private fun setSelectedResolutionText(position: Int) {
+        if (getSupportedResolutionsList().isEmpty()) return
+
+        with(getSupportedResolutionsList()[position]) {
+            binding.videoResolutions.setText(getResTextFromSelection(), false)
+        }
+    }
+
     private fun hasPermissions(): Boolean {
         permissions.forEach {
             if (ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED) {
@@ -1218,6 +1256,58 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return true
+    }
+
+    private fun getSupportedResolutionsList(): List<CamcorderProfile> {
+        val completeProfiles = arrayListOf<Int>()
+        completeProfiles.apply {
+            add(CamcorderProfile.QUALITY_4KDCI)
+            add(CamcorderProfile.QUALITY_2K)
+            add(CamcorderProfile.QUALITY_2160P)
+            add(CamcorderProfile.QUALITY_1080P)
+            add(CamcorderProfile.QUALITY_720P)
+            add(CamcorderProfile.QUALITY_480P)
+            add(CamcorderProfile.QUALITY_CIF)
+
+            //  slow mo videos
+            add(CamcorderProfile.QUALITY_HIGH_SPEED_4KDCI)  //  API level 30
+            add(CamcorderProfile.QUALITY_HIGH_SPEED_2160P)
+            add(CamcorderProfile.QUALITY_HIGH_SPEED_1080P)
+            add(CamcorderProfile.QUALITY_HIGH_SPEED_720P)
+            add(CamcorderProfile.QUALITY_HIGH_SPEED_480P)
+            //  API level 30
+            add(CamcorderProfile.QUALITY_HIGH_SPEED_VGA)
+            add(CamcorderProfile.QUALITY_HIGH_SPEED_CIF)
+        }
+
+        val availableProfiles = arrayListOf<CamcorderProfile>()
+        completeProfiles.forEach {
+            if (CamcorderProfile.hasProfile(it)) {
+                availableProfiles.add(CamcorderProfile.get(it))
+            }
+        }
+
+        return availableProfiles.distinctBy { it.videoFrameWidth }
+    }
+
+    fun CamcorderProfile.getResTextFromSelection(): String = when {
+        videoFrameWidth < 720 ||
+                videoFrameHeight < 720 -> {
+            "vga${videoFrameWidth}x${videoFrameHeight}"
+        }
+        videoFrameWidth in 720..1080 ||
+                videoFrameHeight in 720..1080 -> {
+            "hd${videoFrameWidth}x${videoFrameHeight}"
+        }
+        videoFrameWidth in 1081..2048 ||
+                videoFrameHeight in 1081..2048 -> {
+            "hd2k${videoFrameWidth}x${videoFrameHeight}"
+        }
+        videoFrameWidth in 2160..4096 ||
+                videoFrameHeight in 2160..4096 -> {
+            "hd4k${videoFrameWidth}x${videoFrameHeight}"
+        }
+        else -> "${videoFrameWidth}x${videoFrameHeight}"
     }
 }
 
