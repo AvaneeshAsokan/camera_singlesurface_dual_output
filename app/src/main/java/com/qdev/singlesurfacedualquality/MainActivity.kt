@@ -22,10 +22,10 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.text.InputType
 import android.util.Log
 import android.util.Size
@@ -36,7 +36,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.res.ResourcesCompat
-import androidx.core.performance.play.services.PlayServicesDevicePerformance
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.qdev.singlesurfacedualquality.databinding.ActivityMainBinding
@@ -45,6 +44,9 @@ import com.qdev.singlesurfacedualquality.utils.InputSurface
 import com.qdev.singlesurfacedualquality.utils.OutputSurface
 import com.qdev.singlesurfacedualquality.utils.YuvUtils
 import com.qdev.singlesurfacedualquality.views.ResolutionsSpinnerAdapter
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers.Main
+import kotlinx.coroutines.launch
 import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -63,7 +65,6 @@ class MainActivity : AppCompatActivity() {
     private val TAG = MainActivity::class.java.canonicalName
 
     private lateinit var binding: ActivityMainBinding
-    private lateinit var devicePerformance: PlayServicesDevicePerformance
 
     private val permissions: Array<String> = arrayOf(android.Manifest.permission.CAMERA, android.Manifest.permission.RECORD_AUDIO)
 
@@ -115,16 +116,15 @@ class MainActivity : AppCompatActivity() {
     private val supportedResolutions by lazy(::getSupportedResolutionsList)
 
     private val imageListener = ImageReader.OnImageAvailableListener { reader ->
-        val cameraImage = reader.acquireLatestImage() ?: return@OnImageAvailableListener
-        /*Log.d(TAG, "onImageAvailable: plane 0: Buffer size = ${cameraImage.planes[0].buffer.remaining()}, " +
+        val cameraImage = reader.acquireLatestImage() ?: return@OnImageAvailableListener/*Log.d(TAG, "onImageAvailable: plane 0: Buffer size = ${cameraImage.planes[0].buffer.remaining()}, " +
                 "plane 1: Buffer size = ${cameraImage.planes[1].buffer.remaining()}, \n" +
                 "plane 2: Buffer size = ${cameraImage.planes[2].buffer.remaining()} \n" +
                 "width * height = ${cameraImage.width * cameraImage.height} \n" +
                 "width * height / 4 = ${(cameraImage.width / 2) * (cameraImage.height / 2)}")*/
-        Log.d(TAG, "onImageAvailable: " +
-                "\nwidth x height = ${cameraImage.width} x ${cameraImage.height}" +
-                "\npixel strides = ${cameraImage.planes[0].pixelStride}, ${cameraImage.planes[1].pixelStride}, ${cameraImage.planes[2].pixelStride}" +
-                "\nrow strides = ${cameraImage.planes[0].rowStride}, ${cameraImage.planes[1].rowStride}, ${cameraImage.planes[2].rowStride}")
+        Log.d(
+            TAG,
+            "onImageAvailable: " + "\nwidth x height = ${cameraImage.width} x ${cameraImage.height}" + "\npixel strides = ${cameraImage.planes[0].pixelStride}, ${cameraImage.planes[1].pixelStride}, ${cameraImage.planes[2].pixelStride}" + "\nrow strides = ${cameraImage.planes[0].rowStride}, ${cameraImage.planes[1].rowStride}, ${cameraImage.planes[2].rowStride}"
+        )
         if (isRecording) {
             //  enqueue the image to the NDK queue
             val timeToCreateQueueEntry = measureTimeMillis {
@@ -349,8 +349,7 @@ class MainActivity : AppCompatActivity() {
             corePoolSize, maximumPoolSize, keepAliveTime, TimeUnit.SECONDS, workQueue
         )
 
-        while (true) {
-            /*if (!this::queue.isInitialized || queue.isEmpty()) {
+        while (true) {/*if (!this::queue.isInitialized || queue.isEmpty()) {
                 Thread.sleep(10)
                 continue
             }*/
@@ -376,8 +375,7 @@ class MainActivity : AppCompatActivity() {
                 Log.d(TAG, "processQueue: hq input taken ${System.currentTimeMillis() - startTime} ms")
                 hqDone.set(true)
                 handleHqCodecOutputBuffer()
-            }*/
-            /*encodeLqHandler?.post {
+            }*//*encodeLqHandler?.post {
                 handleLqInputBuffers(cameraImage)
                 Log.d(TAG, "processQueue: lq input taken ${System.currentTimeMillis() - startTime} ms")
                 lqDone.set(true)
@@ -457,9 +455,15 @@ class MainActivity : AppCompatActivity() {
                     inputImage?.let {
 //                        YuvUtils.copyYUV(cameraImage, it)
                         Log.d(TAG, "handleHqInputBuffers: colour format = ${it.format}")
-                        Log.d(TAG, "handleHqInputBuffers: plane 0, pixel stride = ${it.planes[0].pixelStride}, row stride = ${it.planes[0].rowStride}")
-                        Log.d(TAG, "handleHqInputBuffers: plane 1, pixel stride = ${it.planes[1].pixelStride}, row stride = ${it.planes[1].rowStride}")
-                        Log.d(TAG, "handleHqInputBuffers: plane 2, pixel stride = ${it.planes[2].pixelStride}, row stride = ${it.planes[2].rowStride}")
+                        Log.d(
+                            TAG, "handleHqInputBuffers: plane 0, pixel stride = ${it.planes[0].pixelStride}, row stride = ${it.planes[0].rowStride}"
+                        )
+                        Log.d(
+                            TAG, "handleHqInputBuffers: plane 1, pixel stride = ${it.planes[1].pixelStride}, row stride = ${it.planes[1].rowStride}"
+                        )
+                        Log.d(
+                            TAG, "handleHqInputBuffers: plane 2, pixel stride = ${it.planes[2].pixelStride}, row stride = ${it.planes[2].rowStride}"
+                        )
                         val timeToCopy = measureTimeMillis {
 //                                YuvUtils.copyToImage(cameraImage, it)
                             YuvUtils.copyToImageV3(it, false)
@@ -468,9 +472,8 @@ class MainActivity : AppCompatActivity() {
                         hqDone.set(true)
                         mediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
                             0,/* size = */
-                            it.planes[0].buffer.remaining(),/* presentationTimeUs = */
-                            /*cameraImage.timestampUs / 1000*/
-                            timestamp/1000 ,/* flags = */
+                            it.planes[0].buffer.remaining(),/* presentationTimeUs = *//*cameraImage.timestampUs / 1000*/
+                            timestamp / 1000,/* flags = */
                             if (isRecording) {
                                 if (hqFrameCount == 300) {
                                     MediaCodec.BUFFER_FLAG_KEY_FRAME
@@ -508,9 +511,8 @@ class MainActivity : AppCompatActivity() {
                         lqDone.set(true)
                         lqMediaCodec?.queueInputBuffer(/* index = */ index,/* offset = */
                             0,/* size = */
-                            it.planes[0].buffer.remaining(),/* presentationTimeUs = */
-                            /*cameraImage.timestampUs / 1000*/
-                            timestamp/1000 ,/* flags = */
+                            it.planes[0].buffer.remaining(),/* presentationTimeUs = *//*cameraImage.timestampUs / 1000*/
+                            timestamp / 1000,/* flags = */
                             if (isRecording) {
                                 if (lqFrameCount == 300) {
                                     MediaCodec.BUFFER_FLAG_KEY_FRAME
@@ -539,6 +541,7 @@ class MainActivity : AppCompatActivity() {
 
             if (imReaderBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
                 imReaderBufferInfo.size = 0
+                startChronometerUI()
             }
 
             if (imReaderBufferInfo.size != 0) {
@@ -860,6 +863,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         YuvUtils.cleanupQueue()
+        stopChronometerUI()
     }
 
     private fun setupSingleSurface() {
@@ -1152,8 +1156,6 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        devicePerformance = PlayServicesDevicePerformance(this.applicationContext)
-
         bindListeners()
     }
 
@@ -1179,7 +1181,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        Log.d(TAG, "onResume: Media performance class = ${devicePerformance.mediaPerformanceClass}")
 
         if (!hasPermissions()) {
             cameraPermissionRequest.launch(permissions)
@@ -1308,24 +1309,41 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun CamcorderProfile.getResTextFromSelection(): String = when {
-        videoFrameWidth < 720 ||
-                videoFrameHeight < 720 -> {
+        videoFrameWidth < 720 || videoFrameHeight < 720 -> {
             "vga${videoFrameWidth}x${videoFrameHeight}"
         }
-        videoFrameWidth in 720..1080 ||
-                videoFrameHeight in 720..1080 -> {
+
+        videoFrameWidth in 720..1080 || videoFrameHeight in 720..1080 -> {
             "hd${videoFrameWidth}x${videoFrameHeight}"
         }
-        videoFrameWidth in 1081..2048 ||
-                videoFrameHeight in 1081..2048 -> {
+
+        videoFrameWidth in 1081..2048 || videoFrameHeight in 1081..2048 -> {
             "hd2k${videoFrameWidth}x${videoFrameHeight}"
         }
-        videoFrameWidth in 2160..4096 ||
-                videoFrameHeight in 2160..4096 -> {
+
+        videoFrameWidth in 2160..4096 || videoFrameHeight in 2160..4096 -> {
             "hd4k${videoFrameWidth}x${videoFrameHeight}"
         }
+
         else -> "${videoFrameWidth}x${videoFrameHeight}"
     }
+
+    fun startChronometerUI() {
+        CoroutineScope(Main).launch {
+            binding.chronometer.base = SystemClock.elapsedRealtime()
+            binding.chronometer.start()
+            binding.chronometer.background = ResourcesCompat.getDrawable(resources, R.drawable.background_ai_red_button, theme)
+        }
+    }
+
+    fun stopChronometerUI() {
+        CoroutineScope(Main).launch {
+            binding.chronometer.stop()
+            binding.chronometer.background = null
+        }
+    }
+
+
 }
 
 class YUV420(
