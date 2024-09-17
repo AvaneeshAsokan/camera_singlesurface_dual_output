@@ -102,6 +102,9 @@ class MainActivity : AppCompatActivity() {
     private var isLowQualityMuxerStarted: Boolean = false
     private var semaphore: Semaphore = Semaphore(1)
 
+    private var cameraImageType: String? = null
+    private var inputImageType: String? = null
+
     private val FRAGMENT_SHADER: String =
         "#extension GL_OES_EGL_image_external : require\n" + "precision mediump float;\n" + "varying vec2 vTextureCoord;\n" + "uniform samplerExternalOES sTexture;\n" + "void main() {\n" + "  gl_FragColor = texture2D(sTexture, vTextureCoord).rbga;\n" + "}\n"
 
@@ -116,240 +119,83 @@ class MainActivity : AppCompatActivity() {
     //  the output file counts
     private var hqFileCount: Int = 0
     private var lqFileCount: Int = 0
+    private var imageLock = Object()
 
     private lateinit var queue: CircularArrayQueue
 
     private val supportedResolutions by lazy(::getSupportedResolutionsList)
 
     private val imageListener = ImageReader.OnImageAvailableListener { reader ->
-        val cameraImage = reader.acquireLatestImage() ?: return@OnImageAvailableListener/*Log.d(TAG, "onImageAvailable: plane 0: Buffer size = ${cameraImage.planes[0].buffer.remaining()}, " +
-                "plane 1: Buffer size = ${cameraImage.planes[1].buffer.remaining()}, \n" +
-                "plane 2: Buffer size = ${cameraImage.planes[2].buffer.remaining()} \n" +
-                "width * height = ${cameraImage.width * cameraImage.height} \n" +
-                "width * height / 4 = ${(cameraImage.width / 2) * (cameraImage.height / 2)}")*/
-        Log.d(
-            TAG,
-            "onImageAvailable: " + "\nwidth x height = ${cameraImage.width} x ${cameraImage.height}" + "\npixel strides = ${cameraImage.planes[0].pixelStride}, ${cameraImage.planes[1].pixelStride}, ${cameraImage.planes[2].pixelStride}" + "\nrow strides = ${cameraImage.planes[0].rowStride}, ${cameraImage.planes[1].rowStride}, ${cameraImage.planes[2].rowStride}"
-        )
-        if (isRecording) {
-            //  enqueue the image to the NDK queue
-            /*val timeToCreateQueueEntry = measureTimeMillis {
-                YuvUtils.addToNativeQueue(
-                    yData = cameraImage.planes[0].buffer,
-                    uData = cameraImage.planes[1].buffer,
-                    vData = cameraImage.planes[2].buffer,
-                    yRowStride = cameraImage.planes[0].rowStride,
-                    uRowStride = cameraImage.planes[1].rowStride,
-                    vRowStride = cameraImage.planes[2].rowStride,
-                    yPixelStride = cameraImage.planes[0].pixelStride,
-                    uPixelStride = cameraImage.planes[1].pixelStride,
-                    vPixelStride = cameraImage.planes[2].pixelStride,
-                    timestamp = cameraImage.timestamp,
-                    width = cameraImage.width,
-                    height = cameraImage.height
-                )
-                Log.d(TAG, "onImageAvailable: to queue frame time stamp = ${cameraImage.timestamp}")
-            }*/
+        synchronized(imageLock){
+            val cameraImage = reader.acquireLatestImage() ?: return@OnImageAvailableListener
+            Log.d(
+                TAG,
+                "onImageAvailable: " + "\nwidth x height = ${cameraImage.width} x ${cameraImage.height}" + "\npixel strides = ${cameraImage.planes[0].pixelStride}, ${cameraImage.planes[1].pixelStride}, ${cameraImage.planes[2].pixelStride}" + "\nrow strides = ${cameraImage.planes[0].rowStride}, ${cameraImage.planes[1].rowStride}, ${cameraImage.planes[2].rowStride}"
+            )
+            if (isRecording) {
+                Log.d(TAG, "onImageAvailable: colour format = ${cameraImage.format}")
+                if (hqCodecStarted) {
+                    handleHqInputBuffers(cameraImage)
+                }
+                if (lqCodecStarted) {
+                    handleLqInputBuffers(cameraImage)
+                }
+                cameraImage.close()
+                if (hqCodecStarted) { handleHqCodecOutputBuffer() }
+                if (lqCodecStarted) { handleLqCodecOutputBuffer() }
 
-            Log.d(TAG, "onImageAvailable: colour format = ${cameraImage.format}")
+            } else {
+                cameraImage.close()
 
-            val timestamp = cameraImage.timestamp
-
-            //  enqueue the image to the kotlin queue
-            /*val timeToCreateQueueEntry = measureTimeMillis {
-                if (!this::queue.isInitialized){
-                    queue = CircularArrayQueue(
-                        6,
-                        cameraImage.planes[0].buffer.capacity(),
-                        cameraImage.planes[1].buffer.capacity(),
-                        cameraImage.planes[2].buffer.capacity()
-                    )
+                if (isHighQualityMuxerStarted) {
+                    try {
+                        isHighQualityMuxerStarted = false
+                        hqMuxer?.stop()
+                    } catch (e: IllegalStateException) {
+                        e.printStackTrace()
+                    } finally {
+                        hqMuxer?.release()
+                        hqMuxer = null
+                    }
                 }
 
-                queue.enqueue(
-                    width = cameraImage.width,
-                    height = cameraImage.height,
-                    y = cameraImage.planes[0].buffer,
-                    u = cameraImage.planes[1].buffer,
-                    v = cameraImage.planes[2].buffer,
-                    yRowStride = cameraImage.planes[0].rowStride,
-                    uRowStride = cameraImage.planes[1].rowStride,
-                    vRowStride = cameraImage.planes[2].rowStride,
-                    yPixelStride = cameraImage.planes[0].pixelStride,
-                    uPixelStride = cameraImage.planes[1].pixelStride,
-                    vPixelStride = cameraImage.planes[2].pixelStride,
-                    timestampUs = cameraImage.timestamp
-                )
-            }
+                if (isLowQualityMuxerStarted) {
+                    try {
+                        isLowQualityMuxerStarted = false
+                        lqMuxer?.stop()
+                    } catch (e: IllegalStateException) {
+                        e.printStackTrace()
+                    } finally {
+                        lqMuxer?.release()
+                        lqMuxer = null
+                    }
+                }
 
-            Log.d(TAG, "onImageAvailable: time taken to add to queue $timeToCreateQueueEntry ms")*/
+                if (lqCodecStarted) {
+                    try {
+                        Log.d(TAG, "onImageAvailable: stopping low quality codec")
+                        lqMediaCodec?.stop()
+                    } catch (e: IllegalStateException) {
+                        e.printStackTrace()
+                    } finally {
+                        lqMediaCodec?.release()
+                        lqMediaCodec = null
+                    }
+                }
 
-            if (hqCodecStarted) {
-                handleHqInputBuffers(cameraImage)
-            }
-            if (lqCodecStarted) {
-                handleLqInputBuffers(cameraImage)
-            }
-            cameraImage.close()
-            if (hqCodecStarted) { handleHqCodecOutputBuffer() }
-            if (lqCodecStarted) { handleLqCodecOutputBuffer() }
-
-        } else {
-            cameraImage.close()
-
-            if (isHighQualityMuxerStarted) {
-                try {
-                    isHighQualityMuxerStarted = false
-                    hqMuxer?.stop()
-                } catch (e: IllegalStateException) {
-                    e.printStackTrace()
-                } finally {
-                    hqMuxer?.release()
-                    hqMuxer = null
+                if (hqCodecStarted) {
+                    try {
+                        mediaCodec?.stop()
+                        Log.d(TAG, "onImageAvailable: stopping high quality codec")
+                    } catch (e: IllegalStateException) {
+                        e.printStackTrace()
+                    } finally {
+                        mediaCodec?.release()
+                        mediaCodec = null
+                    }
                 }
             }
-
-            if (isLowQualityMuxerStarted) {
-                try {
-                    isLowQualityMuxerStarted = false
-                    lqMuxer?.stop()
-                } catch (e: IllegalStateException) {
-                    e.printStackTrace()
-                } finally {
-                    lqMuxer?.release()
-                    lqMuxer = null
-                }
-            }
-
-            if (lqCodecStarted) {
-                try {
-                    Log.d(TAG, "onImageAvailable: stopping low quality codec")
-                    lqMediaCodec?.stop()
-                } catch (e: IllegalStateException) {
-                    e.printStackTrace()
-                } finally {
-                    lqMediaCodec?.release()
-                    lqMediaCodec = null
-                }
-            }
-
-            if (hqCodecStarted) {
-                try {
-                    mediaCodec?.stop()
-                    Log.d(TAG, "onImageAvailable: stopping high quality codec")
-                } catch (e: IllegalStateException) {
-                    e.printStackTrace()
-                } finally {
-                    mediaCodec?.release()
-                    mediaCodec = null
-                }
-            }
-
-            /*imageReader?.setOnImageAvailableListener(null, null)
-            imageReader?.close()
-            imageReader = null*/
         }
-
-
-        /*val planes = cameraImage.planes
-        val yBuffer = planes[0].buffer
-        val uBuffer = planes[1].buffer
-        val vBuffer = planes[2].buffer
-
-        // Get the strides and buffer sizes
-        val yRowStride = planes[0].rowStride
-        val uRowStride = planes[1].rowStride
-        val vRowStride = planes[2].rowStride
-
-        val yPixelStride = planes[0].pixelStride
-        val uPixelStride = planes[1].pixelStride
-        val vPixelStride = planes[2].pixelStride
-
-        Log.d(TAG, "onImageAvailable: yRowStride = $yRowStride, uRowStride = $uRowStride, vRowStride = $vRowStride")
-        Log.d(TAG, "onImageAvailable: yPixelStride = $yPixelStride, uPixelStride = $uPixelStride, vPixelStride = $vPixelStride")
-
-        YuvUtils.addToNativeQueue(
-            yBuffer,
-            uBuffer,
-            vBuffer,
-            yRowStride,
-            uRowStride,
-            vRowStride,
-            yPixelStride,
-            uPixelStride,
-            vPixelStride
-        )
-
-        cameraImage.close()*/
-
-        /*Log.d(TAG, "onImageAvailable: image format ${cameraImage.format}, plane 0 size ${cameraImage.planes[0].buffer.remaining()}")
-
-        encodeHandler?.post {
-            handleHqInputBuffers(cameraImage)
-            hqDone.set(true)
-            handleHqCodecOutputBuffer()
-        }
-        encodeLqHandler?.post {
-            handleLqInputBuffers(cameraImage)
-            lqDone.set(true)
-            handleLqCodecOutputBuffer()
-        }
-
-        while (!hqDone.get() || !lqDone.get()) {
-            Thread.sleep(10)
-        }
-        if (semaphore.tryAcquire(1, 100, TimeUnit.MILLISECONDS)) {
-            cameraImage.close()
-            semaphore.release()
-        }
-
-        hqDone.set(false)
-        lqDone.set(false)
-
-        if (!isRecording) {
-//            mediaCodec?.signalEndOfInputStream()
-            try {
-                mediaCodec?.stop()
-            } catch (e: IllegalStateException) {
-                e.printStackTrace()
-            } finally {
-                mediaCodec?.release()
-                mediaCodec = null
-            }
-
-            try {
-                isHighQualityMuxerStarted = false
-                hqMuxer?.stop()
-            } catch (e: IllegalStateException) {
-                e.printStackTrace()
-            } finally {
-                hqMuxer?.release()
-                hqMuxer = null
-            }
-
-            try {
-                lqMediaCodec?.stop()
-            } catch (e: IllegalStateException) {
-                e.printStackTrace()
-            } finally {
-                lqMediaCodec?.release()
-                lqMediaCodec = null
-            }
-
-            try {
-                isLowQualityMuxerStarted = false
-                lqMuxer?.stop()
-            } catch (e: IllegalStateException) {
-                e.printStackTrace()
-            } finally {
-                lqMuxer?.release()
-                lqMuxer = null
-            }
-
-            imageReader?.setOnImageAvailableListener(null, null)
-            imageReader?.close()
-            imageReader = null
-        }*/
     }
 
     private fun processQueue() {
@@ -465,17 +311,19 @@ class MainActivity : AppCompatActivity() {
                     //  copy the ImageReader image to the input image
                     val inputImage = mediaCodec?.getInputImage(index)
                     inputImage?.let {
-                        val cameraImageType = YuvUtils.determineYuvFormat(cameraImage)
-                        val inputImageType = YuvUtils.determineYuvFormat(it)
+                        if (cameraImageType == null || inputImageType == null) {
+                            cameraImageType = YuvUtils.determineYuvFormat(cameraImage)
+                            inputImageType = YuvUtils.determineYuvFormat(it)
+                        }
                         Log.d(TAG, "handleHqInputBuffers: camera image format = ${cameraImage.format}")
                         Log.d(TAG, "handleHqInputBuffers: input image format = ${it.format}")
                         Log.d(TAG, "handleHqInputBuffers: camera image type = $cameraImageType")
                         Log.d(TAG, "handleHqInputBuffers: codec image type = $inputImageType")
 //                        YuvUtils.copyYUV(cameraImage, it)
                         val timeToCopy = measureTimeMillis {
-//                                YuvUtils.copyToImage(cameraImage, it)
+//                            YuvUtils.copyToImage(cameraImage, it)
 //                            YuvUtils.copyToImageV3(it, false)
-                            copyByType(cameraImageType, inputImageType, cameraImage, it, false)
+                            copyByType(cameraImageType!!, inputImageType!!, cameraImage, it, false)
                         }
 
                         Log.d(TAG, "handleHqInputBuffers: time to copy $timeToCopy ms")
@@ -589,6 +437,31 @@ class MainActivity : AppCompatActivity() {
 
     private fun copyByType(cameraImageType: String, inputImageType: String, cameraImage: Image, inputImage: Image, removeFromQueue: Boolean = false) {
         when {
+            cameraImageType =="YV12" && inputImageType == "I420" -> {
+                Yuv.convertI420Copy(
+                    srcY = cameraImage.planes[0].buffer,
+                    srcStrideY = RowStride(cameraImage.planes[0].rowStride),
+                    srcOffsetY = 0,
+                    srcV = cameraImage.planes[2].buffer,    //  swapped uv planes
+                    srcStrideV = RowStride(cameraImage.planes[2].rowStride),
+                    srcOffsetV = 0,
+                    srcU = cameraImage.planes[1].buffer,
+                    srcStrideU = RowStride(cameraImage.planes[1].rowStride),
+                    srcOffsetU = 0,
+                    dstY = inputImage.planes[0].buffer,
+                    dstStrideY = RowStride(inputImage.planes[0].rowStride),
+                    dstOffsetY = 0,
+                    dstU = inputImage.planes[1].buffer,
+                    dstStrideU = RowStride(inputImage.planes[1].rowStride),
+                    dstOffsetU = 0,
+                    dstV = inputImage.planes[2].buffer,
+                    dstStrideV = RowStride(inputImage.planes[2].rowStride),
+                    dstOffsetV = 0,
+                    width = cameraImage.width,
+                    height = cameraImage.height
+                )
+            }
+
             cameraImageType == "I420" && inputImageType == "I420" -> {
                 // Copy I420 to I420
                 Yuv.convertI420Copy(
@@ -610,6 +483,29 @@ class MainActivity : AppCompatActivity() {
                     dstV = inputImage.planes[2].buffer,
                     dstStrideV = RowStride(inputImage.planes[2].rowStride),
                     dstOffsetV = 0,
+                    width = cameraImage.width,
+                    height = cameraImage.height
+                )
+            }
+
+            cameraImageType == "YV12" && (inputImageType == "NV12" || inputImageType == "NV21") -> {
+                // Copy I420 to I420
+                Yuv.convertI420ToNV12(
+                    srcY = cameraImage.planes[0].buffer,
+                    srcStrideY = RowStride(cameraImage.planes[0].rowStride),
+                    srcOffsetY = 0,
+                    srcV = cameraImage.planes[2].buffer,
+                    srcStrideV = RowStride(cameraImage.planes[2].rowStride),
+                    srcOffsetV = 0,
+                    srcU = cameraImage.planes[1].buffer,
+                    srcStrideU = RowStride(cameraImage.planes[1].rowStride),
+                    srcOffsetU = 0,
+                    dstY = inputImage.planes[0].buffer,
+                    dstStrideY = RowStride(inputImage.planes[0].rowStride),
+                    dstOffsetY = 0,
+                    dstUV = inputImage.planes[1].buffer,
+                    dstStrideUV = RowStride(inputImage.planes[1].rowStride),
+                    dstOffsetUV = 0,
                     width = cameraImage.width,
                     height = cameraImage.height
                 )
@@ -661,7 +557,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
-            (cameraImageType == "NV12" || cameraImageType == "NV21") && (inputImageType == "NV12" || inputImageType == "NV21") -> {
+            (cameraImageType == "NV12" && inputImageType == "NV12") -> {
                 // Copy NV12 to NV12 or NV21 to NV21
                 Yuv.planerNV12Copy(
                     srcY = cameraImage.planes[0].buffer,
@@ -679,6 +575,57 @@ class MainActivity : AppCompatActivity() {
                     width = cameraImage.width,
                     height = cameraImage.height
                 )
+            }
+
+            (cameraImageType == "NV21" && inputImageType == "NV21") -> {
+                // Copy NV12 to NV12 or NV21 to NV21
+                Yuv.planerNV12Copy(
+                    srcY = cameraImage.planes[0].buffer,
+                    srcStrideY = RowStride(cameraImage.planes[0].rowStride),
+                    srcOffsetY = 0,
+                    srcUV = cameraImage.planes[1].buffer,
+                    srcStrideUV = RowStride(cameraImage.planes[1].rowStride),
+                    srcOffsetUV = 0,
+                    dstY = inputImage.planes[0].buffer,
+                    dstStrideY = RowStride(inputImage.planes[0].rowStride),
+                    dstOffsetY = 0,
+                    dstUV = inputImage.planes[1].buffer,
+                    dstStrideUV = RowStride(inputImage.planes[1].rowStride),
+                    dstOffsetUV = 0,
+                    width = cameraImage.width,
+                    height = cameraImage.height
+                )
+            }
+
+            ((cameraImageType == "NV21" && inputImageType == "NV12") || (cameraImageType == "NV12" && inputImageType == "NV21")) -> {
+                // Copy NV12 to NV12 or NV21 to NV21
+                if (cameraImageType == "NV12"){
+                    YuvUtils.convertNV12ToNV21(
+                        srcY = cameraImage.planes[0].buffer,
+                        srcStrideY = cameraImage.planes[0].rowStride,
+                        dstY = inputImage.planes[0].buffer,
+                        dstStrideY = inputImage.planes[0].rowStride,
+                        srcUV = cameraImage.planes[1].buffer,
+                        srcStrideUV = cameraImage.planes[1].rowStride,
+                        dstVU = inputImage.planes[1].buffer,
+                        dstStrideVU = inputImage.planes[1].rowStride,
+                        cameraImage.width,
+                        cameraImage.height
+                    )
+                } else {
+                    YuvUtils.convertNV21ToNV12(
+                        srcY = cameraImage.planes[0].buffer,
+                        srcStrideY = cameraImage.planes[0].rowStride,
+                        dstY = inputImage.planes[0].buffer,
+                        dstStrideY = inputImage.planes[0].rowStride,
+                        srcVU = cameraImage.planes[1].buffer,
+                        srcStrideVU = cameraImage.planes[1].rowStride,
+                        dstUV = inputImage.planes[1].buffer,
+                        dstStrideUV = inputImage.planes[1].rowStride,
+                        cameraImage.width,
+                        cameraImage.height
+                    )
+                }
             }
 
             else -> {
@@ -711,15 +658,17 @@ class MainActivity : AppCompatActivity() {
                     val inputImage = lqMediaCodec?.getInputImage(index)
                     inputImage?.let {
 //                        YuvUtils.copyYUV(cameraImage, it)
-                        val cameraImageType = YuvUtils.determineYuvFormat(cameraImage)
-                        val inputImageType = YuvUtils.determineYuvFormat(it)
+                        if (cameraImageType == null || inputImageType == null) {
+                            cameraImageType = YuvUtils.determineYuvFormat(cameraImage)
+                            inputImageType = YuvUtils.determineYuvFormat(it)
+                        }
                         Log.d(TAG, "handleHqInputBuffers: camera image type = ${cameraImageType}")
                         Log.d(TAG, "handleHqInputBuffers: codec image type = ${inputImageType}")
 //                        YuvUtils.copyYUV(cameraImage, it)
                         val timeToCopy = measureTimeMillis {
 //                                YuvUtils.copyToImage(cameraImage, it)
 //                            YuvUtils.copyToImageV3(it, false)
-                            copyByType(cameraImageType, inputImageType, cameraImage, it, true)
+                            copyByType(cameraImageType!!, inputImageType!!, cameraImage, it, true)
                         }
 
                         Log.d(TAG, "handleLqInputBuffers: time to copy ${timeToCopy} ms")
@@ -1107,6 +1056,9 @@ class MainActivity : AppCompatActivity() {
             close()
         }
 
+        cameraImageType = null
+        inputImageType = null
+
         YuvUtils.cleanupQueue()
         stopChronometerUI()
     }
@@ -1138,14 +1090,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         YuvUtils.setupQueue(5, chosenSize.width, chosenSize.height)
-
+        val supportedNvFormat = YuvUtils.isNV12orNV21Supported(this, cameraDevice?.id?:"0", "video/avc")
+        Log.d(TAG, "setupSingleSurface: mediaCodec NV 12 supported? $supportedNvFormat")
         try {
             mediaCodec = MediaCodec.createEncoderByType("video/avc")
 
             val format = MediaFormat.createVideoFormat("video/avc", chosenSize.width, chosenSize.height/*1920, 1080*/)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 6 * 1000 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, if (supportedNvFormat.first) supportedNvFormat.second else MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second between I-frames
 
             mediaCodec!!.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -1160,7 +1113,7 @@ class MainActivity : AppCompatActivity() {
             val format = MediaFormat.createVideoFormat("video/avc", chosenSize.width, chosenSize.height/*1920, 1080*/)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 500 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, if (supportedNvFormat.first) supportedNvFormat.second else MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5) // 1 second between I-frames
 
             lqMediaCodec!!.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)

@@ -964,3 +964,56 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void * /* reserved */) {
     gJvm = vm;
     return JNI_VERSION_1_6;
 }
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_qdev_singlesurfacedualquality_utils_YuvUtils_checkNv12orNv21(JNIEnv *env, jobject thiz, jobject image) {
+        // Constants representing the formats
+        const int NV12 = 0;
+        const int NV21 = 1;
+        const int UNKNOWN = -1;
+
+        jclass imageClass = env->GetObjectClass(image);
+        jmethodID getPlanesMethod = env->GetMethodID(imageClass, "getPlanes", "()[Landroid/media/Image$Plane;");
+        jobjectArray planes = (jobjectArray) env->CallObjectMethod(image, getPlanesMethod);
+
+        if (planes == nullptr || env->GetArrayLength(planes) < 2) {
+            return UNKNOWN;
+        }
+
+        jobject plane1 = env->GetObjectArrayElement(planes, 1); // The second plane (UV plane)
+        jclass planeClass = env->GetObjectClass(plane1);
+
+        jmethodID getBufferMethod = env->GetMethodID(planeClass, "getBuffer", "()Ljava/nio/ByteBuffer;");
+        jobject bufferObject = env->CallObjectMethod(plane1, getBufferMethod);
+
+        jmethodID getPixelStrideMethod = env->GetMethodID(planeClass, "getPixelStride", "()I");
+        jint pixelStride = env->CallIntMethod(plane1, getPixelStrideMethod);
+
+        jmethodID getRowStrideMethod = env->GetMethodID(planeClass, "getRowStride", "()I");
+        jint rowStride = env->CallIntMethod(plane1, getRowStrideMethod);
+
+        // Get the ByteBuffer's address
+        unsigned char* buffer = (unsigned char*) env->GetDirectBufferAddress(bufferObject);
+        if (buffer == nullptr) {
+            LOGE("Failed to get direct buffer address.");
+            return UNKNOWN;
+        }
+
+        // Assuming we check the first 4 bytes to differentiate NV12 (UVUV) vs NV21 (VUVU)
+        unsigned char u_value = buffer[0];
+        unsigned char v_value = buffer[1];
+
+        if (pixelStride == 2) {
+            // If pixel stride is 2, it's likely either NV12 or NV21.
+            if (u_value < v_value) {
+                // NV12 has U first then V (UVUV...)
+                return NV12;
+            } else {
+                // NV21 has V first then U (VUVU...)
+                return NV21;
+            }
+        }
+
+        return UNKNOWN;
+}
