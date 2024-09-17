@@ -199,10 +199,8 @@ object YuvUtils {
                 if (colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar || // NV12
                     colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
                 ) {   // NV21
-                    return if (colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar) Pair(
-                        true,
-                        MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
-                    )
+                    return if (colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar)
+                        Pair(true, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar)
                     else Pair(true, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar)
                 }
             }

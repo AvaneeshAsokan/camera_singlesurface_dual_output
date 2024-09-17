@@ -20,6 +20,7 @@ import android.media.Image
 import android.media.ImageReader
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaScannerConnection
@@ -47,8 +48,12 @@ import com.qdev.singlesurfacedualquality.utils.OutputSurface
 import com.qdev.singlesurfacedualquality.utils.Utils
 import com.qdev.singlesurfacedualquality.utils.YuvUtils
 import com.qdev.singlesurfacedualquality.views.ResolutionsSpinnerAdapter
+import io.github.crow_misia.libyuv.ArgbBuffer
+import io.github.crow_misia.libyuv.Nv12Buffer
 import io.github.crow_misia.libyuv.RowStride
 import io.github.crow_misia.libyuv.Yuv
+import io.github.crow_misia.libyuv.ext.ImageExt.toNv12Buffer
+import io.github.crow_misia.libyuv.ext.ImageExt.toNv21Buffer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.Dispatchers.Main
@@ -128,10 +133,6 @@ class MainActivity : AppCompatActivity() {
     private val imageListener = ImageReader.OnImageAvailableListener { reader ->
         synchronized(imageLock){
             val cameraImage = reader.acquireLatestImage() ?: return@OnImageAvailableListener
-            Log.d(
-                TAG,
-                "onImageAvailable: " + "\nwidth x height = ${cameraImage.width} x ${cameraImage.height}" + "\npixel strides = ${cameraImage.planes[0].pixelStride}, ${cameraImage.planes[1].pixelStride}, ${cameraImage.planes[2].pixelStride}" + "\nrow strides = ${cameraImage.planes[0].rowStride}, ${cameraImage.planes[1].rowStride}, ${cameraImage.planes[2].rowStride}"
-            )
             if (isRecording) {
                 Log.d(TAG, "onImageAvailable: colour format = ${cameraImage.format}")
                 if (hqCodecStarted) {
@@ -314,11 +315,26 @@ class MainActivity : AppCompatActivity() {
                         if (cameraImageType == null || inputImageType == null) {
                             cameraImageType = YuvUtils.determineYuvFormat(cameraImage)
                             inputImageType = YuvUtils.determineYuvFormat(it)
+
+                            Log.d(
+                                TAG,
+                                "handleHqInputBuffers: cameraImage " + "\nwidth x height = ${cameraImage.width} x ${cameraImage.height}" +
+                                        "\npixel strides = ${cameraImage.planes[0].pixelStride}, ${cameraImage.planes[1].pixelStride}, ${cameraImage.planes[2].pixelStride}" +
+                                        "\nrow strides = ${cameraImage.planes[0].rowStride}, ${cameraImage.planes[1].rowStride}, ${cameraImage.planes[2].rowStride}"
+                            )
+                            Log.d(
+                                TAG,
+                                "handleHqInputBuffers: inputImage" + "\nwidth x height = ${it.width} x ${it.height}" +
+                                        "\npixel strides = ${it.planes[0].pixelStride}, ${it.planes[1].pixelStride}, ${it.planes[2].pixelStride}" +
+                                        "\nrow strides = ${it.planes[0].rowStride}, ${it.planes[1].rowStride}, ${it.planes[2].rowStride}"
+                            )
+
+                            Log.d(TAG, "handleHqInputBuffers: camera image format = ${cameraImage.format}")
+                            Log.d(TAG, "handleHqInputBuffers: input image format = ${it.format}")
+                            Log.d(TAG, "handleHqInputBuffers: camera image type = $cameraImageType")
+                            Log.d(TAG, "handleHqInputBuffers: codec image type = $inputImageType")
                         }
-                        Log.d(TAG, "handleHqInputBuffers: camera image format = ${cameraImage.format}")
-                        Log.d(TAG, "handleHqInputBuffers: input image format = ${it.format}")
-                        Log.d(TAG, "handleHqInputBuffers: camera image type = $cameraImageType")
-                        Log.d(TAG, "handleHqInputBuffers: codec image type = $inputImageType")
+
 //                        YuvUtils.copyYUV(cameraImage, it)
                         val timeToCopy = measureTimeMillis {
 //                            YuvUtils.copyToImage(cameraImage, it)
@@ -557,28 +573,14 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
-            (cameraImageType == "NV12" && inputImageType == "NV12") -> {
+            (cameraImageType == "NV12" && inputImageType == "NV12") ||
+                    (cameraImageType == "NV21" && inputImageType == "NV21") -> {
                 // Copy NV12 to NV12 or NV21 to NV21
-                Yuv.planerNV12Copy(
-                    srcY = cameraImage.planes[0].buffer,
-                    srcStrideY = RowStride(cameraImage.planes[0].rowStride),
-                    srcOffsetY = 0,
-                    srcUV = cameraImage.planes[1].buffer,
-                    srcStrideUV = RowStride(cameraImage.planes[1].rowStride),
-                    srcOffsetUV = 0,
-                    dstY = inputImage.planes[0].buffer,
-                    dstStrideY = RowStride(inputImage.planes[0].rowStride),
-                    dstOffsetY = 0,
-                    dstUV = inputImage.planes[1].buffer,
-                    dstStrideUV = RowStride(inputImage.planes[1].rowStride),
-                    dstOffsetUV = 0,
-                    width = cameraImage.width,
-                    height = cameraImage.height
-                )
-            }
+                val yOffset = 0
+                val uOffset = cameraImage.width * cameraImage.height
+                val vOffset = uOffset + (cameraImage.width / 2) * (cameraImage.height / 2)
+                val uvOffset = cameraImage.width * cameraImage.height
 
-            (cameraImageType == "NV21" && inputImageType == "NV21") -> {
-                // Copy NV12 to NV12 or NV21 to NV21
                 Yuv.planerNV12Copy(
                     srcY = cameraImage.planes[0].buffer,
                     srcStrideY = RowStride(cameraImage.planes[0].rowStride),
@@ -599,33 +601,22 @@ class MainActivity : AppCompatActivity() {
 
             ((cameraImageType == "NV21" && inputImageType == "NV12") || (cameraImageType == "NV12" && inputImageType == "NV21")) -> {
                 // Copy NV12 to NV12 or NV21 to NV21
-                if (cameraImageType == "NV12"){
-                    YuvUtils.convertNV12ToNV21(
-                        srcY = cameraImage.planes[0].buffer,
-                        srcStrideY = cameraImage.planes[0].rowStride,
-                        dstY = inputImage.planes[0].buffer,
-                        dstStrideY = inputImage.planes[0].rowStride,
-                        srcUV = cameraImage.planes[1].buffer,
-                        srcStrideUV = cameraImage.planes[1].rowStride,
-                        dstVU = inputImage.planes[1].buffer,
-                        dstStrideVU = inputImage.planes[1].rowStride,
-                        cameraImage.width,
-                        cameraImage.height
-                    )
-                } else {
-                    YuvUtils.convertNV21ToNV12(
-                        srcY = cameraImage.planes[0].buffer,
-                        srcStrideY = cameraImage.planes[0].rowStride,
-                        dstY = inputImage.planes[0].buffer,
-                        dstStrideY = inputImage.planes[0].rowStride,
-                        srcVU = cameraImage.planes[1].buffer,
-                        srcStrideVU = cameraImage.planes[1].rowStride,
-                        dstUV = inputImage.planes[1].buffer,
-                        dstStrideUV = inputImage.planes[1].rowStride,
-                        cameraImage.width,
-                        cameraImage.height
-                    )
-                }
+                Yuv.planerNV21ToNV12(
+                    srcY = cameraImage.planes[0].buffer,
+                    srcStrideY = RowStride(cameraImage.planes[0].rowStride),
+                    srcOffsetY = 0,
+                    dstY = inputImage.planes[0].buffer,
+                    dstStrideY = RowStride(inputImage.planes[0].rowStride),
+                    dstOffsetY = 0,
+                    srcVU = cameraImage.planes[1].buffer,
+                    srcStrideVU = RowStride(cameraImage.planes[1].rowStride),
+                    srcOffsetVU = 0,
+                    dstUV = inputImage.planes[1].buffer,
+                    dstStrideUV = RowStride(inputImage.planes[1].rowStride),
+                    dstOffsetUV = 0,
+                    width = cameraImage.width,
+                    height = cameraImage.height
+                )
             }
 
             else -> {
@@ -662,8 +653,6 @@ class MainActivity : AppCompatActivity() {
                             cameraImageType = YuvUtils.determineYuvFormat(cameraImage)
                             inputImageType = YuvUtils.determineYuvFormat(it)
                         }
-                        Log.d(TAG, "handleHqInputBuffers: camera image type = ${cameraImageType}")
-                        Log.d(TAG, "handleHqInputBuffers: codec image type = ${inputImageType}")
 //                        YuvUtils.copyYUV(cameraImage, it)
                         val timeToCopy = measureTimeMillis {
 //                                YuvUtils.copyToImage(cameraImage, it)
@@ -1115,6 +1104,8 @@ class MainActivity : AppCompatActivity() {
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, if (supportedNvFormat.first) supportedNvFormat.second else MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5) // 1 second between I-frames
+//            format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+//            format.setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel52)
 
             lqMediaCodec!!.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         } catch (e: IOException) {
