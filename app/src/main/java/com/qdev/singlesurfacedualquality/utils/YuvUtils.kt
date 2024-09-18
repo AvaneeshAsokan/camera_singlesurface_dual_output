@@ -7,6 +7,7 @@ import android.hardware.camera2.CameraManager
 import android.media.Image
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
+import android.os.Build
 import com.qdev.singlesurfacedualquality.YUV420
 import io.github.crow_misia.libyuv.Yuv
 import java.nio.ByteBuffer
@@ -15,6 +16,31 @@ object YuvUtils {
     init {
         System.loadLibrary("yuv_copy")
     }
+
+    fun isPotentiallyAffectedDevice(): Boolean {
+        val affectedDevices = listOf(
+            "SM-G985F", // Samsung Galaxy S20+ (Exynos)
+            "SM-G986B", // Samsung Galaxy S20+ 5G (Exynos)
+            "SM-G986U", // Samsung Galaxy S20+ 5G (Snapdragon)
+            "SM-G986U1", // Samsung Galaxy S20+ 5G (Snapdragon, unlocked)
+            "SM-G986W"  // Samsung Galaxy S20+ 5G (Snapdragon, Canada)
+            // Add more models if you identify more affected devices
+        )
+
+        val affectedHardware = listOf(
+            "exynos990", // Exynos chipset found in some S20+ models
+            "qcom"       // Qualcomm chipset found in some S20+ models
+        )
+
+        val manufacturer = Build.MANUFACTURER
+        val model = Build.MODEL
+        val hardware = Build.HARDWARE
+
+        // Check if the manufacturer is Samsung and the model or hardware is in the list of affected devices
+        return (manufacturer.equals("samsung", ignoreCase = true) &&
+                (affectedDevices.contains(model) || affectedHardware.contains(hardware)))
+    }
+
 
     fun determineYuvFormat(image: Image): String {
         val planes = image.planes

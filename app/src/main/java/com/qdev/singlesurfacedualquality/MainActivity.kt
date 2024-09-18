@@ -24,6 +24,7 @@ import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaScannerConnection
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
@@ -34,6 +35,7 @@ import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
+import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -48,12 +50,8 @@ import com.qdev.singlesurfacedualquality.utils.OutputSurface
 import com.qdev.singlesurfacedualquality.utils.Utils
 import com.qdev.singlesurfacedualquality.utils.YuvUtils
 import com.qdev.singlesurfacedualquality.views.ResolutionsSpinnerAdapter
-import io.github.crow_misia.libyuv.ArgbBuffer
-import io.github.crow_misia.libyuv.Nv12Buffer
 import io.github.crow_misia.libyuv.RowStride
 import io.github.crow_misia.libyuv.Yuv
-import io.github.crow_misia.libyuv.ext.ImageExt.toNv12Buffer
-import io.github.crow_misia.libyuv.ext.ImageExt.toNv21Buffer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.Dispatchers.Main
@@ -131,7 +129,7 @@ class MainActivity : AppCompatActivity() {
     private val supportedResolutions by lazy(::getSupportedResolutionsList)
 
     private val imageListener = ImageReader.OnImageAvailableListener { reader ->
-        synchronized(imageLock){
+        synchronized(imageLock) {
             val cameraImage = reader.acquireLatestImage() ?: return@OnImageAvailableListener
             if (isRecording) {
                 Log.d(TAG, "onImageAvailable: colour format = ${cameraImage.format}")
@@ -142,8 +140,12 @@ class MainActivity : AppCompatActivity() {
                     handleLqInputBuffers(cameraImage)
                 }
                 cameraImage.close()
-                if (hqCodecStarted) { handleHqCodecOutputBuffer() }
-                if (lqCodecStarted) { handleLqCodecOutputBuffer() }
+                if (hqCodecStarted) {
+                    handleHqCodecOutputBuffer()
+                }
+                if (lqCodecStarted) {
+                    handleLqCodecOutputBuffer()
+                }
 
             } else {
                 cameraImage.close()
@@ -318,15 +320,11 @@ class MainActivity : AppCompatActivity() {
 
                             Log.d(
                                 TAG,
-                                "handleHqInputBuffers: cameraImage " + "\nwidth x height = ${cameraImage.width} x ${cameraImage.height}" +
-                                        "\npixel strides = ${cameraImage.planes[0].pixelStride}, ${cameraImage.planes[1].pixelStride}, ${cameraImage.planes[2].pixelStride}" +
-                                        "\nrow strides = ${cameraImage.planes[0].rowStride}, ${cameraImage.planes[1].rowStride}, ${cameraImage.planes[2].rowStride}"
+                                "handleHqInputBuffers: cameraImage " + "\nwidth x height = ${cameraImage.width} x ${cameraImage.height}" + "\npixel strides = ${cameraImage.planes[0].pixelStride}, ${cameraImage.planes[1].pixelStride}, ${cameraImage.planes[2].pixelStride}" + "\nrow strides = ${cameraImage.planes[0].rowStride}, ${cameraImage.planes[1].rowStride}, ${cameraImage.planes[2].rowStride}"
                             )
                             Log.d(
                                 TAG,
-                                "handleHqInputBuffers: inputImage" + "\nwidth x height = ${it.width} x ${it.height}" +
-                                        "\npixel strides = ${it.planes[0].pixelStride}, ${it.planes[1].pixelStride}, ${it.planes[2].pixelStride}" +
-                                        "\nrow strides = ${it.planes[0].rowStride}, ${it.planes[1].rowStride}, ${it.planes[2].rowStride}"
+                                "handleHqInputBuffers: inputImage" + "\nwidth x height = ${it.width} x ${it.height}" + "\npixel strides = ${it.planes[0].pixelStride}, ${it.planes[1].pixelStride}, ${it.planes[2].pixelStride}" + "\nrow strides = ${it.planes[0].rowStride}, ${it.planes[1].rowStride}, ${it.planes[2].rowStride}"
                             )
 
                             Log.d(TAG, "handleHqInputBuffers: camera image format = ${cameraImage.format}")
@@ -453,7 +451,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun copyByType(cameraImageType: String, inputImageType: String, cameraImage: Image, inputImage: Image, removeFromQueue: Boolean = false) {
         when {
-            cameraImageType =="YV12" && inputImageType == "I420" -> {
+            cameraImageType == "YV12" && inputImageType == "I420" -> {
                 Yuv.convertI420Copy(
                     srcY = cameraImage.planes[0].buffer,
                     srcStrideY = RowStride(cameraImage.planes[0].rowStride),
@@ -573,8 +571,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
-            (cameraImageType == "NV12" && inputImageType == "NV12") ||
-                    (cameraImageType == "NV21" && inputImageType == "NV21") -> {
+            (cameraImageType == "NV12" && inputImageType == "NV12") || (cameraImageType == "NV21" && inputImageType == "NV21") -> {
                 // Copy NV12 to NV12 or NV21 to NV21
                 val yOffset = 0
                 val uOffset = cameraImage.width * cameraImage.height
@@ -601,22 +598,41 @@ class MainActivity : AppCompatActivity() {
 
             ((cameraImageType == "NV21" && inputImageType == "NV12") || (cameraImageType == "NV12" && inputImageType == "NV21")) -> {
                 // Copy NV12 to NV12 or NV21 to NV21
-                Yuv.planerNV21ToNV12(
-                    srcY = cameraImage.planes[0].buffer,
-                    srcStrideY = RowStride(cameraImage.planes[0].rowStride),
-                    srcOffsetY = 0,
-                    dstY = inputImage.planes[0].buffer,
-                    dstStrideY = RowStride(inputImage.planes[0].rowStride),
-                    dstOffsetY = 0,
-                    srcVU = cameraImage.planes[1].buffer,
-                    srcStrideVU = RowStride(cameraImage.planes[1].rowStride),
-                    srcOffsetVU = 0,
-                    dstUV = inputImage.planes[1].buffer,
-                    dstStrideUV = RowStride(inputImage.planes[1].rowStride),
-                    dstOffsetUV = 0,
-                    width = cameraImage.width,
-                    height = cameraImage.height
-                )
+                if (YuvUtils.isPotentiallyAffectedDevice()){
+                    Yuv.planerNV12Copy(
+                        srcY = cameraImage.planes[0].buffer,
+                        srcStrideY = RowStride(cameraImage.planes[0].rowStride),
+                        srcOffsetY = 0,
+                        srcUV = cameraImage.planes[1].buffer,
+                        srcStrideUV = RowStride(cameraImage.planes[1].rowStride),
+                        srcOffsetUV = 0,
+                        dstY = inputImage.planes[0].buffer,
+                        dstStrideY = RowStride(inputImage.planes[0].rowStride),
+                        dstOffsetY = 0,
+                        dstUV = inputImage.planes[1].buffer,
+                        dstStrideUV = RowStride(inputImage.planes[1].rowStride),
+                        dstOffsetUV = 0,
+                        width = cameraImage.width,
+                        height = cameraImage.height
+                    )
+                } else {
+                    Yuv.planerNV21ToNV12(
+                        srcY = cameraImage.planes[0].buffer,
+                        srcStrideY = RowStride(cameraImage.planes[0].rowStride),
+                        srcOffsetY = 0,
+                        dstY = inputImage.planes[0].buffer,
+                        dstStrideY = RowStride(inputImage.planes[0].rowStride),
+                        dstOffsetY = 0,
+                        srcVU = cameraImage.planes[1].buffer,
+                        srcStrideVU = RowStride(cameraImage.planes[1].rowStride),
+                        srcOffsetVU = 0,
+                        dstUV = inputImage.planes[1].buffer,
+                        dstStrideUV = RowStride(inputImage.planes[1].rowStride),
+                        dstOffsetUV = 0,
+                        width = cameraImage.width,
+                        height = cameraImage.height
+                    )
+                }
             }
 
             else -> {
@@ -733,11 +749,10 @@ class MainActivity : AppCompatActivity() {
                     hqMuxer = null
                 }
                 hqFileCount++
-                val hqFile =
-                    File(
-                        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
-                        "${Utils.getDeviceName()}_high_quality_$hqFileCount.mp4"
-                    ).absolutePath
+                val hqFile = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+                    "${Utils.getDeviceName()}_high_quality_$hqFileCount.mp4"
+                ).absolutePath
                 hqMuxer = MediaMuxer(hqFile, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
 
                 CoroutineScope(IO).launch {
@@ -791,11 +806,10 @@ class MainActivity : AppCompatActivity() {
                     lqMuxer = null
                 }
                 lqFileCount++
-                val lqFile =
-                    File(
-                        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
-                        "${Utils.getDeviceName()}_low_quality_$lqFileCount.mp4"
-                    ).absolutePath
+                val lqFile = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+                    "${Utils.getDeviceName()}_low_quality_$lqFileCount.mp4"
+                ).absolutePath
                 lqMuxer = MediaMuxer(lqFile, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
 
                 CoroutineScope(IO).launch {
@@ -935,6 +949,9 @@ class MainActivity : AppCompatActivity() {
         }
         try {
             setupSingleSurface()
+            if (mediaCodec == null || lqMediaCodec == null){
+                Toast.makeText(this, "cannot create codec", Toast.LENGTH_LONG).show()
+            }
             setupMuxers()
             //  preview
             val texture = binding.texture.surfaceTexture
@@ -993,12 +1010,10 @@ class MainActivity : AppCompatActivity() {
     private fun setupMuxers() {
         try {
             val hqFile = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
-                "${Utils.getDeviceName()}_high_quality.mp4"
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "${Utils.getDeviceName()}_high_quality.mp4"
             ).absolutePath
             val lqFile = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
-                "${Utils.getDeviceName()}_low_quality.mp4"
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "${Utils.getDeviceName()}_low_quality.mp4"
             ).absolutePath
             Log.d(TAG, "setupMuxers: outputting to $hqFile")
             hqMuxer = MediaMuxer(hqFile, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
@@ -1079,35 +1094,46 @@ class MainActivity : AppCompatActivity() {
         }
 
         YuvUtils.setupQueue(5, chosenSize.width, chosenSize.height)
-        val supportedNvFormat = YuvUtils.isNV12orNV21Supported(this, cameraDevice?.id?:"0", "video/avc")
+        val supportedNvFormat = YuvUtils.isNV12orNV21Supported(this, cameraDevice?.id ?: "0", "video/avc")
         Log.d(TAG, "setupSingleSurface: mediaCodec NV 12 supported? $supportedNvFormat")
         try {
-            mediaCodec = MediaCodec.createEncoderByType("video/avc")
 
             val format = MediaFormat.createVideoFormat("video/avc", chosenSize.width, chosenSize.height/*1920, 1080*/)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 6 * 1000 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, if (supportedNvFormat.first) supportedNvFormat.second else MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+            format.setInteger(
+                MediaFormat.KEY_COLOR_FORMAT,
+                if (supportedNvFormat.first) supportedNvFormat.second else MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+            )
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second between I-frames
+            mediaCodec =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) MediaCodec.createEncoderByType("video/avc")
+                else findSoftwareEncoderForFormat(format)
 
-            mediaCodec!!.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            mediaCodec?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         } catch (e: IOException) {
             e.printStackTrace()
         } catch (e: CameraAccessException) {
             e.printStackTrace()
         }
         try {
-            lqMediaCodec = MediaCodec.createEncoderByType("video/avc")
 
             val format = MediaFormat.createVideoFormat("video/avc", chosenSize.width, chosenSize.height/*1920, 1080*/)
             format.setInteger(MediaFormat.KEY_BIT_RATE, 500 * 1000) // 10 Mbps
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, if (supportedNvFormat.first) supportedNvFormat.second else MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+            format.setInteger(
+                MediaFormat.KEY_COLOR_FORMAT,
+                if (supportedNvFormat.first) supportedNvFormat.second else MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+            )
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5) // 1 second between I-frames
 //            format.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
 //            format.setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel52)
 
-            lqMediaCodec!!.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            lqMediaCodec =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) MediaCodec.createEncoderByType("video/avc")
+                else findSoftwareEncoderForFormat(format)
+
+            lqMediaCodec?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         } catch (e: IOException) {
             e.printStackTrace()
         } catch (e: CameraAccessException) {
@@ -1117,6 +1143,77 @@ class MainActivity : AppCompatActivity() {
         imageReader?.close()
         imageReader = ImageReader.newInstance(chosenSize.width, chosenSize.height/*1920, 1080*/, android.graphics.ImageFormat.YUV_420_888, 2)
         imageReader?.setOnImageAvailableListener(imageListener, backgroundHandler)
+    }
+
+
+    private fun getSoftwareOnlyEncoder(mimeType: String): MediaCodec? {
+        val codecList = MediaCodecList(MediaCodecList.ALL_CODECS)
+        val codecInfos = codecList.codecInfos
+
+        for (codecInfo in codecInfos) {
+            if (!codecInfo.isEncoder) {
+                continue // Skip if not an encoder
+            }
+
+            // Check if codec supports the desired MIME type
+            val capabilities = try {
+                codecInfo.getCapabilitiesForType(mimeType)
+            } catch (e: IllegalArgumentException) {
+                continue
+            }
+            if (capabilities != null) {
+                // Check if the codec is not hardware-accelerated
+                val isSoftwareOnly = !codecInfo.isHardwareAccelerated
+                if (isSoftwareOnly) {
+                    try {
+                        // Create the encoder using the codec name
+                        return MediaCodec.createByCodecName(codecInfo.name)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun findSoftwareEncoderForFormat(mediaFormat: MediaFormat): MediaCodec? {
+        val mfWithoutFPS = MediaFormat(mediaFormat)
+        mfWithoutFPS.setString(MediaFormat.KEY_FRAME_RATE, null)
+
+        val codecList = MediaCodecList(MediaCodecList.ALL_CODECS)
+        val codecInfos = codecList.codecInfos
+
+        val googleH264Encoder = "OMX.google.h264.encoder" // Common software fallback
+
+        for (codecInfo in codecInfos) {
+            // We are only interested in encoders
+            if (!codecInfo.isEncoder) continue
+
+            // Check if the codec is software-based (not hardware-accelerated)
+            if (codecInfo.isHardwareAccelerated) continue
+
+            // Check if this codec supports the given format
+            val supportedTypes = codecInfo.supportedTypes
+            for (type in supportedTypes) {
+                if (type.equals(mfWithoutFPS.getString(MediaFormat.KEY_MIME), ignoreCase = true)) {
+                    // Check if the codec can handle the specified format
+                    val capabilities = codecInfo.getCapabilitiesForType(type)
+                    if (capabilities.isFormatSupported(mfWithoutFPS)) {
+                        return MediaCodec.createByCodecName(codecInfo.name) // Return the name of the suitable software encoder
+                    }
+                }
+            }
+        }
+// Fallback to the common software encoder if no other software encoder is found
+        val supportedTypes = codecList.codecInfos.firstOrNull { it.name == googleH264Encoder }?.supportedTypes ?: arrayOf()
+
+        if (supportedTypes.contains(mediaFormat.getString(MediaFormat.KEY_MIME))) {
+            return MediaCodec.createByCodecName(googleH264Encoder)
+        }
+
+        // If no software encoder is found, return null
+        return null
     }
 
     private fun encodeFrames() {
